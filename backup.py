@@ -18,8 +18,10 @@ APP_DIR = os.path.dirname(os.path.abspath(DB_PATH))
 
 # File name prefixes: automatic backups are removed by prune_auto_backups,
 # backups made by hand never are
-MANUAL_PREFIX = "WinDashboard_backup_"
-AUTO_PREFIX   = "WinDashboard_autobackup_"
+MANUAL_PREFIX = "n-dashboard_backup_"
+AUTO_PREFIX   = "n-dashboard_autobackup_"
+# Automatic backups of WinDashboard (the old name) still count for due date and pruning
+AUTO_PREFIXES = (AUTO_PREFIX, "WinDashboard_autobackup_")
 
 
 def create_backup(progress_callback=None, auto: bool = False) -> tuple[str, list[str]]:
@@ -208,12 +210,12 @@ def list_backups() -> list[dict]:
             "size_mb":   round(size_mb, 2),
             "meta":      meta,
             "date":      meta.get("backup_date", "")[:16].replace("T", "  "),
-            "auto":      fname.startswith(AUTO_PREFIX),
+            "auto":      fname.startswith(AUTO_PREFIXES),
         })
     return result
 
 
-def _backup_files(prefix: str = "") -> list[str]:
+def _backup_files(prefix: str | tuple[str, ...] = "") -> list[str]:
     """Names of backup files, newest first (by modification time)."""
     if not os.path.exists(BACKUP_DIR):
         return []
@@ -226,7 +228,7 @@ def auto_backup_due(every_days: int) -> bool:
     """True when automatic backups are on and the newest one is at least every_days old."""
     if every_days <= 0:
         return False
-    newest = _backup_files(AUTO_PREFIX)
+    newest = _backup_files(AUTO_PREFIXES)
     if not newest:
         return True
     made = datetime.fromtimestamp(os.path.getmtime(os.path.join(BACKUP_DIR, newest[0])))
@@ -237,7 +239,7 @@ def prune_auto_backups(keep: int) -> list[str]:
     """Deletes the oldest automatic backups so that `keep` remain.
     Backups made by hand are never deleted. Returns names of the deleted files."""
     removed = []
-    for fname in _backup_files(AUTO_PREFIX)[max(keep, 1):]:
+    for fname in _backup_files(AUTO_PREFIXES)[max(keep, 1):]:
         try:
             os.remove(os.path.join(BACKUP_DIR, fname))
             removed.append(fname)

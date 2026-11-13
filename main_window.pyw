@@ -27,7 +27,7 @@ from database import (
 )
 from config import (APP_NAME, APP_TITLE, MAIN_WINDOW_SIZE, ARCHIVE_DIR,
                     DEFAULT_CHECKPOINT, DB_PATH, DB_CHECK_INTERVAL_MS, DATA_DIR,
-                    LEGACY_DATA_DIR, ASSETS_DIR, INSTANCE_LOCK_PATH)
+                    LEGACY_DATA_DIRS, ASSETS_DIR, INSTANCE_LOCK_PATH)
 from archive import export_task_to_zip, import_task_from_zip, list_archive, remove_archived_task
 from backup import (create_backup, list_backups, delete_backup, restore_backup,
                     auto_backup_due, prune_auto_backups)
@@ -588,7 +588,7 @@ class MainWindow:
         ext = dialog.result["format"]
         path = filedialog.asksaveasfilename(
             parent=self.root, title="Export Tasks", defaultextension=f".{ext}",
-            initialfile=f"WinDashboard_tasks_{date.today().isoformat()}.{ext}",
+            initialfile=f"n-dashboard_tasks_{date.today().isoformat()}.{ext}",
             filetypes=[("Markdown", "*.md")] if ext == "md" else [("CSV", "*.csv")])
         if not path:
             return
@@ -1421,14 +1421,19 @@ def main():
         root.destroy()
         return
 
-    # Data of an older version, kept next to the program files, goes to the data folder
+    # Data of an older version (WinDashboard data folder, or next to the program files)
+    # goes to the data folder
+    migrated, legacy_dir = [], None
     try:
-        migrated = migrate_legacy_data(LEGACY_DATA_DIR)
+        for legacy_dir in LEGACY_DATA_DIRS:
+            migrated = migrate_legacy_data(legacy_dir)
+            if migrated:
+                break
     except Exception as ex:
         root.withdraw()
         messagebox.showerror(
             APP_TITLE,
-            f"Data of the previous version could not be moved:\n{LEGACY_DATA_DIR}\n\n"
+            f"Data of the previous version could not be moved:\n{legacy_dir}\n\n"
             f"to the data folder:\n{DATA_DIR}\n\n{ex}\n\n"
             "Nothing was deleted. The application will be closed.",
             parent=root
@@ -1443,7 +1448,7 @@ def main():
     if migrated:
         root.after(400, lambda: messagebox.showinfo(
             "Data Moved",
-            f"Your data was copied from the program folder:\n{LEGACY_DATA_DIR}\n\n"
+            f"Your data was copied from the folder of the previous version:\n{legacy_dir}\n\n"
             f"to the data folder:\n{DATA_DIR}\n\n"
             "The old files were left untouched. When everything looks right you can "
             "delete them: tasks.db*, settings.json, archive/, attachments/, backups/.",

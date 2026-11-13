@@ -471,6 +471,10 @@ def test_auto_backup():
         old = time.time() - age_days * 86400
         os.utime(path, (old, old))
         autos.append(path)
+    # The oldest one was made by WinDashboard (the old app name) and still counts as automatic
+    old_name = os.path.join(backup.BACKUP_DIR, "WinDashboard_autobackup_2000-01-01_000000.zip")
+    os.replace(autos[0], old_name)
+    autos[0] = old_name
     # The newest automatic backup is 10 days old
     assert backup.auto_backup_due(7)
     assert not backup.auto_backup_due(14)

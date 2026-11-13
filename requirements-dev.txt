@@ -1,4 +1,0 @@
-# Tools for developers only (not part of the build)
--r requirements.txt
-# for tools/make_icons.py, which regenerates assets/app.ico and assets/png/*.png
-pillow==13.0.0

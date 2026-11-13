@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# install_lin.sh - installs WinDashboard for the current user, no sudo needed.
-#   ./install_lin.sh               install (run it from the folder with the WinDashboard binary)
+# install_lin.sh - installs n-dashboard for the current user, no sudo needed.
+#   ./install_lin.sh               install (run it from the folder with the n-dashboard binary)
 #   ./install_lin.sh --uninstall   remove the program; asks before deleting your data
 set -e
 cd "$(dirname "$0")"
 
-APP=WinDashboard
-ID=windashboard
+APP=n-dashboard
+ID=n-dashboard
 SHARE="${XDG_DATA_HOME:-$HOME/.local/share}"
 BIN_DIR="$HOME/.local/bin"
 ICON_DIR="$SHARE/icons/hicolor/256x256/apps"

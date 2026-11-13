@@ -4,7 +4,7 @@
 
 The setup and build scripts for Apple Silicon and Linux haven't been run yet, and neither has drag and drop of files on those systems. Check:
 
-- `setup_macos.sh`, `build_macos.sh` on an Apple Silicon Mac: the `.app` starts, has its icon, keeps data in `~/Library/Application Support/WinDashboard`;
+- `setup_macos.sh`, `build_macos.sh` on an Apple Silicon Mac: the `.app` starts, has its icon, keeps data in `~/Library/Application Support/n-dashboard`;
 - `setup_lin.sh`, `build_lin.sh`, `install_lin.sh` (and `--uninstall`) on Linux: menu entry, icon, `StartupWMClass` matching the window;
 - dropping files and folders onto the Links and Attachments panels on both systems;
 - fonts and the look of both themes, since they were only checked on Windows.
@@ -15,7 +15,7 @@ The setup and build scripts for Apple Silicon and Linux haven't been run yet, an
 
 ## Connection to a shared database (e.g. PostgreSQL)
 
-Today every copy of WinDashboard keeps its data in a local SQLite file. The plan is a team setup:
+Today every copy of n-dashboard keeps its data in a local SQLite file. The plan is a team setup:
 
 - the current application becomes the **team member** app, working on a shared database (PostgreSQL or similar) instead of, or next to, the local SQLite file;
 - a separate **manager** application shows the tasks of the whole team.

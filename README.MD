@@ -1,4 +1,4 @@
-# WinDashboard
+# n-dashboard
 
 A desktop task dashboard for Windows, Linux and macOS (Apple Silicon), written in Python with tkinter.
 
@@ -30,32 +30,32 @@ The libraries are pinned in `requirements.txt`:
 
 | System | Setup | Build | Result in `dist/` |
 |---|---|---|---|
-| Windows | `setup.bat` | `build.bat` | `WinDashboard.exe` (one file) |
-| Linux | `./setup_lin.sh` | `./build_lin.sh` | `WinDashboard` (one file), `WinDashboard.png`, `install_lin.sh` |
-| macOS (Apple Silicon) | `./setup_macos.sh` | `./build_macos.sh` | `WinDashboard.app` (arm64), `WinDashboard-macos.zip` |
+| Windows | `setup.bat` | `build.bat` | `n-dashboard.exe` (one file) |
+| Linux | `./setup_lin.sh` | `./build_lin.sh` | `n-dashboard` (one file), `n-dashboard.png`, `install_lin.sh` |
+| macOS (Apple Silicon) | `./setup_macos.sh` | `./build_macos.sh` | `n-dashboard.app` (arm64), `n-dashboard-macos.zip` |
 
 The setup script creates `.venv` (only if it doesn't exist yet) and installs the libraries and PyInstaller into it. On Linux it installs missing system packages through `apt-get`, `dnf`, `pacman` or `zypper`, so it may ask for your sudo password. On Windows it skips a free-threaded Python if `py -3` picks one.
 
 The build script runs PyInstaller with all options written in the script; there's no `.spec` file to maintain. PyInstaller's own hook packs the drag-and-drop extension, so no extra options are needed for it.
 
-On Linux the binary has no icon or menu entry of its own. `dist/install_lin.sh` installs it for the current user without sudo: the program goes to `~/.local/bin/windashboard`, plus an icon and an entry in the applications menu. `install_lin.sh --uninstall` removes them and asks before deleting your data.
+On Linux the binary has no icon or menu entry of its own. `dist/install_lin.sh` installs it for the current user without sudo: the program goes to `~/.local/bin/n-dashboard`, plus an icon and an entry in the applications menu. `install_lin.sh --uninstall` removes them and asks before deleting your data.
 
 Things to know:
 
 - PyInstaller doesn't cross-compile. Build the Linux version on Linux and the macOS version on an Apple Silicon Mac.
 - Intel Macs aren't supported. The macOS scripts stop with an error when Python runs as x86_64, which also happens in a terminal running under Rosetta.
-- Close the running application before building again, or the Windows build fails because it can't overwrite `WinDashboard.exe`.
+- Close the running application before building again, or the Windows build fails because it can't overwrite `n-dashboard.exe`.
 - The scripts don't sign anything. On macOS an unsigned app downloaded from the internet gets blocked by Gatekeeper (right-click → Open the first time), so sign builds before you hand them out. `build_macos.sh` sets no bundle identifier; add `--osx-bundle-identifier` with your own when you sign.
 - Windows Explorer caches icons and may show the old one after a rebuild; renaming or moving the file helps.
-- `WINDASHBOARD_DATA_DIR` makes the app use another data folder, which is handy for trying a build without touching your real data.
+- `N_DASHBOARD_DATA_DIR` makes the app use another data folder, which is handy for trying a build without touching your real data.
 
 ## Where the data lives
 
 | System | Data folder |
 |---|---|
-| Windows | `%LOCALAPPDATA%\WinDashboard` |
-| macOS | `~/Library/Application Support/WinDashboard` |
-| Linux | `~/.local/share/WinDashboard` (or `$XDG_DATA_HOME/WinDashboard`) |
+| Windows | `%LOCALAPPDATA%\n-dashboard` |
+| macOS | `~/Library/Application Support/n-dashboard` |
+| Linux | `~/.local/share/n-dashboard` (or `$XDG_DATA_HOME/n-dashboard`) |
 
 Settings shows the path and has an **Open** button for it. Inside the folder:
 
@@ -68,11 +68,11 @@ Settings shows the path and has an **Open** button for it. Inside the folder:
 | `archive/` | archived tasks as ZIP files; `archive/removed/` for removed ones |
 | `backups/` | full backups, made by hand and automatic ones |
 | `settings.json` | theme, window sizes, automatic backup and idle-task settings |
-| `WinDashboard.lock` | lock that keeps a second copy from starting |
+| `n-dashboard.lock` | lock that keeps a second copy from starting |
 
 Attachment paths in the database are relative to the data folder, so you can move the folder to another computer and it keeps working.
 
-Versions before 0.6 kept their data next to the program files. On the first start the app copies that data into the data folder and tells you where it went. The old files stay where they were until you delete them yourself.
+Up to version 0.7 the app was called WinDashboard and kept its data in a `WinDashboard` folder (for example `%LOCALAPPDATA%\WinDashboard`). Versions before 0.6 kept it next to the program files. On the first start, when the new data folder has no database yet, the app copies the old data over, checking the `WinDashboard` folder first, and tells you where it came from. The old files stay put until you delete them yourself. Automatic backups named `WinDashboard_autobackup_*` still count as automatic, so the app prunes them like the new ones.
 
 ## Main window
 
@@ -242,7 +242,6 @@ Databases and archives from older versions get converted automatically when you 
 | `config.py` | data folder and the settings described above |
 | `test_db.py` | tests |
 | `assets/` | `app.svg` (source), `app.ico` for Windows, `png/app-*.png` for Linux and macOS |
-| `tools/make_icons.py` | regenerates the icons; needs `pip install -r requirements-dev.txt` |
 | `setup*`, `build*`, `install_lin.sh` | scripts described in "Building the application" |
 | `TODO.md` | planned work |
 

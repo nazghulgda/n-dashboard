@@ -19,7 +19,7 @@ fi
 # would build an x86_64 application
 if [ "$(python3 -c 'import platform; print(platform.machine())')" != "arm64" ]; then
     echo "ERROR: this Python runs as $(python3 -c 'import platform; print(platform.machine())'),"
-    echo "but WinDashboard supports Apple Silicon (arm64) only."
+    echo "but n-dashboard supports Apple Silicon (arm64) only."
     echo "Use an Apple Silicon Mac, a terminal without Rosetta, and the universal2 Python"
     echo "from https://www.python.org/downloads/macos/"
     exit 1

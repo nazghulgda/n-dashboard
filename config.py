@@ -6,7 +6,7 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 
-APP_NAME = "WinDashboard"
+APP_NAME = "n-dashboard"
 
 # Program folder: next to the .py files, or the folder PyInstaller unpacks the build into
 PROGRAM_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -15,16 +15,22 @@ PROGRAM_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 ASSETS_DIR = PROGRAM_DIR / "assets"
 
 # Data folder in the standard place of the operating system:
-#   Windows: %LOCALAPPDATA%\WinDashboard
-#   macOS:   ~/Library/Application Support/WinDashboard
-#   Linux:   ~/.local/share/WinDashboard  ($XDG_DATA_HOME if set)
-# WINDASHBOARD_DATA_DIR overrides it (tests, trying out a build on separate data).
-DATA_DIR = Path(os.environ.get("WINDASHBOARD_DATA_DIR")
+#   Windows: %LOCALAPPDATA%\n-dashboard
+#   macOS:   ~/Library/Application Support/n-dashboard
+#   Linux:   ~/.local/share/n-dashboard  ($XDG_DATA_HOME if set)
+# N_DASHBOARD_DATA_DIR overrides it (tests, trying out a build on separate data).
+_DATA_DIR_OVERRIDE = os.environ.get("N_DASHBOARD_DATA_DIR")
+DATA_DIR = Path(_DATA_DIR_OVERRIDE
                 or user_data_dir(APP_NAME, appauthor=False, roaming=False))
 
-# Folder where versions before 0.6 kept their data (next to the .py files);
-# moved to DATA_DIR on the first start by database.migrate_legacy_data
-LEGACY_DATA_DIR = None if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+# Folders of older versions, checked in this order on the first start; the first one
+# with a database is copied to DATA_DIR by database.migrate_legacy_data:
+#   - data folder of versions 0.6-0.7, when the app was called WinDashboard
+#   - versions before 0.6 kept their data next to the .py files
+LEGACY_DATA_DIRS = [d for d in (
+    None if _DATA_DIR_OVERRIDE else Path(user_data_dir("WinDashboard", appauthor=False, roaming=False)),
+    None if getattr(sys, "frozen", False) else Path(__file__).resolve().parent,
+) if d is not None]
 
 DB_PATH = str(DATA_DIR / "tasks.db")
 
@@ -37,7 +43,7 @@ BACKUP_DIR = str(DATA_DIR / "backups")
 SETTINGS_PATH = str(DATA_DIR / "settings.json")
 
 # Lock file which allows only one running copy of the application
-INSTANCE_LOCK_PATH = str(DATA_DIR / "WinDashboard.lock")
+INSTANCE_LOCK_PATH = str(DATA_DIR / "n-dashboard.lock")
 
 # Copied into a new database as the "Default" template, which is then edited in
 # Settings -> Kanban templates; changes here affect new databases only.
@@ -66,7 +72,7 @@ STATUS_IN_PROGRESS = "In progress"   # started, but no status of the template re
 STATUS_FINISHED    = "Finished"      # every checkpoint completed
 
 # Main program window settings
-APP_TITLE = "WinDashboard"
+APP_TITLE = "n-dashboard"
 APP_VERSION = "0.7.0"
 MAIN_WINDOW_SIZE = "900x600"
 
