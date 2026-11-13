@@ -30,6 +30,7 @@ echo.
 echo Setup finished.
 echo   Run the application:   .venv\Scripts\pythonw.exe main_window.pyw
 echo   Build the executable:  build.bat
+pause
 exit /b 0
 
 :error

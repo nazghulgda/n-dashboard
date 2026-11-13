@@ -22,11 +22,10 @@ fi
 ICONSET=build/app.iconset
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
-for size in 16 32 128 256; do
+for size in 16 32 128 256 512; do
     cp "assets/png/app-$size.png"         "$ICONSET/icon_${size}x${size}.png"
     cp "assets/png/app-$((size * 2)).png" "$ICONSET/icon_${size}x${size}@2x.png"
 done
-cp assets/png/app-512.png "$ICONSET/icon_512x512.png"
 iconutil -c icns "$ICONSET" -o build/app.icns
 
 ICONS=()

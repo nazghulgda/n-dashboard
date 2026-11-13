@@ -20,6 +20,7 @@ if errorlevel 1 (
 
 echo.
 echo Build finished: dist\n-dashboard.exe
+pause
 exit /b 0
 
 :error

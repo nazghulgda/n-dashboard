@@ -73,7 +73,7 @@ STATUS_FINISHED    = "Finished"      # every checkpoint completed
 
 # Main program window settings
 APP_TITLE = "n-dashboard"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 MAIN_WINDOW_SIZE = "900x600"
 
 # Database check interval in ms (600 000 ms = 10 minutes)
