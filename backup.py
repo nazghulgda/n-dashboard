@@ -1,4 +1,4 @@
-# backup.py — full backup of the application data
+# Full backup of the application data
 
 import os
 import json
@@ -7,72 +7,114 @@ import tempfile
 import zipfile
 from datetime import datetime
 
-from config import DB_PATH, ARCHIVE_DIR, ATTACHMENTS_DIR, APP_VERSION
+from config import (DB_PATH, ARCHIVE_DIR, ATTACHMENTS_DIR, BACKUP_DIR, APP_VERSION,
+                    SETTINGS_PATH)
 
-# Backups folder — next to the database
-APP_DIR    = os.path.dirname(os.path.abspath(DB_PATH))
-BACKUP_DIR = os.path.join(APP_DIR, "backups")
+# Paths of attachments inside the backup are relative to the data folder
+APP_DIR = os.path.dirname(os.path.abspath(DB_PATH))
 
 
-# ---------------------------------------------------------------------------
 # Main backup function
-# ---------------------------------------------------------------------------
 
-def create_backup(progress_callback=None) -> str:
+# File name prefixes: automatic backups are removed by prune_auto_backups,
+# backups made by hand never are
+MANUAL_PREFIX = "WinDashboard_backup_"
+AUTO_PREFIX   = "WinDashboard_autobackup_"
+
+
+def create_backup(progress_callback=None, auto: bool = False) -> tuple[str, list[str]]:
     """
     Creates full backup of the application as a ZIP file.
-    Collects: database, database backup copy, attachments, tasks archives.
-    Returns path of the created ZIP file.
+    auto=True marks it as an automatic backup (see prune_auto_backups).
+    Collects: database, database backup copy, attachments, tasks archives, settings.
+    Returns (path of the created ZIP file, names of files which could not be packed).
+
+    Safe to run in a background thread: it opens its own database connections.
+
+    The database is copied with the SQLite backup API, so the copy is consistent.
+    The ZIP is written under a temporary name and renamed only when complete,
+    so an interrupted backup never shows up on the list as a valid one.
 
     progress_callback: optional function(name: str, current: int, total: int)
     called while files are packed.
     """
     os.makedirs(BACKUP_DIR, exist_ok=True)
 
+    from database import unique_path
+
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    zip_name  = f"WinDashboard_backup_{timestamp}.zip"
-    zip_path  = os.path.join(BACKUP_DIR, zip_name)
+    prefix    = AUTO_PREFIX if auto else MANUAL_PREFIX
+    zip_path  = unique_path(os.path.join(BACKUP_DIR, f"{prefix}{timestamp}.zip"))
+    tmp_path  = zip_path + ".tmp"
 
-    # Collect list of files to pack
     files_to_pack = _collect_files()
-    total = len(files_to_pack)
+    total   = len(files_to_pack) + (1 if os.path.exists(DB_PATH) else 0)
+    packed  = 0
+    skipped = []
+    snapshot = None
 
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED,
-                         allowZip64=True) as zf:
-        # Backup metadata
-        meta = _build_meta(total)
-        meta_bytes = json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8")
-        zf.writestr("backup_meta.json", meta_bytes)
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir, \
+             zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
 
-        for i, (src_path, arc_name) in enumerate(files_to_pack, 1):
-            if progress_callback:
-                progress_callback(arc_name, i, total)
-            try:
-                zf.write(src_path, arc_name)
-            except Exception:
-                pass  # file not available — skip, do not break
+            # Consistent snapshot of the database; a backup without it makes no sense,
+            # so an error here stops the backup
+            if os.path.exists(DB_PATH):
+                if progress_callback:
+                    progress_callback("tasks.db", 1, total)
+                snapshot = os.path.join(tmp_dir, "tasks.db")
+                src = sqlite3.connect(DB_PATH)
+                dst = sqlite3.connect(snapshot)
+                try:
+                    src.backup(dst)
+                finally:
+                    dst.close()
+                    src.close()
+                zf.write(snapshot, "tasks.db")
+                packed += 1
 
-    return zip_path
+            for src_path, arc_name in files_to_pack:
+                if progress_callback:
+                    progress_callback(arc_name, packed + len(skipped) + 1, total)
+                try:
+                    zf.write(src_path, arc_name)
+                    packed += 1
+                except Exception:
+                    skipped.append(arc_name)  # file not readable: skip it, keep going
+
+            # Metadata is written last, so it reports what was really packed
+            meta = _build_meta(snapshot, packed, skipped)
+            meta["automatic"] = auto
+            zf.writestr("backup_meta.json",
+                        json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8"))
+
+        os.replace(tmp_path, zip_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
+    return zip_path, skipped
 
 
 def _collect_files() -> list[tuple[str, str]]:
     """
     Returns list of (source_path, name_in_archive) for all files
-    included in the backup.
+    included in the backup, except the database itself (see create_backup).
     Names in archive always use "/" as separator.
     """
     files = []
 
-    # Database
-    if os.path.exists(DB_PATH):
-        files.append((DB_PATH, "tasks.db"))
-
-    # Database backup copy
     bak_path = DB_PATH + ".bak"
     if os.path.exists(bak_path):
         files.append((bak_path, "tasks.db.bak"))
 
-    # Attachments — whole folder structure
+    if os.path.exists(SETTINGS_PATH):
+        files.append((SETTINGS_PATH, "settings.json"))
+
     if os.path.exists(ATTACHMENTS_DIR):
         for root, _, fnames in os.walk(ATTACHMENTS_DIR):
             for fname in fnames:
@@ -80,7 +122,6 @@ def _collect_files() -> list[tuple[str, str]]:
                 rel = os.path.relpath(src, APP_DIR)
                 files.append((src, rel.replace("\\", "/")))
 
-    # Tasks archives — archive/ folder
     if os.path.exists(ARCHIVE_DIR):
         for fname in os.listdir(ARCHIVE_DIR):
             if not fname.endswith(".zip"):
@@ -99,14 +140,24 @@ def _collect_files() -> list[tuple[str, str]]:
     return files
 
 
-def _build_meta(file_count: int) -> dict:
-    """Builds backup metadata dictionary."""
-    from database import get_all_tasks, get_on_hold_tasks
-    try:
-        active  = len(get_all_tasks())
-        on_hold = len(get_on_hold_tasks())
-    except Exception:
-        active = on_hold = 0
+def _build_meta(db_snapshot, file_count: int, skipped: list[str]) -> dict:
+    """Builds backup metadata dictionary. Task counts are read from the packed
+    database snapshot, so they describe exactly what is in the backup."""
+    active = on_hold = 0
+    if db_snapshot:
+        try:
+            conn = sqlite3.connect(db_snapshot)
+            try:
+                for flag, count in conn.execute(
+                        "SELECT on_hold, COUNT(*) FROM tasks GROUP BY on_hold"):
+                    if flag:
+                        on_hold += count
+                    else:
+                        active += count
+            finally:
+                conn.close()
+        except Exception:
+            pass
 
     archive_count = 0
     if os.path.exists(ARCHIVE_DIR):
@@ -126,25 +177,22 @@ def _build_meta(file_count: int) -> dict:
         "tasks_archived":   archive_count,
         "attachment_files": att_count,
         "packed_files":     file_count,
+        "skipped_files":    skipped,
     }
 
 
-# ---------------------------------------------------------------------------
 # Listing existing backups
-# ---------------------------------------------------------------------------
 
 def list_backups() -> list[dict]:
     """
     Returns list of existing backups sorted by newest.
-    Each item: {zip_path, filename, date, size_mb, meta}
+    Each item: {zip_path, filename, date, size_mb, meta, auto}
     """
     if not os.path.exists(BACKUP_DIR):
         return []
 
     result = []
-    for fname in sorted(os.listdir(BACKUP_DIR), reverse=True):
-        if not fname.endswith(".zip"):
-            continue
+    for fname in _backup_files():
         zip_path = os.path.join(BACKUP_DIR, fname)
         size_mb  = os.path.getsize(zip_path) / (1024 * 1024)
         meta     = {}
@@ -160,13 +208,45 @@ def list_backups() -> list[dict]:
             "size_mb":   round(size_mb, 2),
             "meta":      meta,
             "date":      meta.get("backup_date", "")[:16].replace("T", "  "),
+            "auto":      fname.startswith(AUTO_PREFIX),
         })
     return result
 
 
-# ---------------------------------------------------------------------------
+def _backup_files(prefix: str = "") -> list[str]:
+    """Names of backup files, newest first (by modification time)."""
+    if not os.path.exists(BACKUP_DIR):
+        return []
+    names = [f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip") and f.startswith(prefix)]
+    return sorted(names, key=lambda f: os.path.getmtime(os.path.join(BACKUP_DIR, f)),
+                  reverse=True)
+
+
+def auto_backup_due(every_days: int) -> bool:
+    """True when automatic backups are on and the newest one is at least every_days old."""
+    if every_days <= 0:
+        return False
+    newest = _backup_files(AUTO_PREFIX)
+    if not newest:
+        return True
+    made = datetime.fromtimestamp(os.path.getmtime(os.path.join(BACKUP_DIR, newest[0])))
+    return (datetime.now() - made).total_seconds() >= every_days * 86400
+
+
+def prune_auto_backups(keep: int) -> list[str]:
+    """Deletes the oldest automatic backups so that `keep` remain.
+    Backups made by hand are never deleted. Returns names of the deleted files."""
+    removed = []
+    for fname in _backup_files(AUTO_PREFIX)[max(keep, 1):]:
+        try:
+            os.remove(os.path.join(BACKUP_DIR, fname))
+            removed.append(fname)
+        except OSError:
+            pass
+    return removed
+
+
 # Restoring a backup
-# ---------------------------------------------------------------------------
 
 def restore_backup(zip_path: str) -> dict:
     """
@@ -280,9 +360,7 @@ def _read_tasks(db_path: str) -> list[dict]:
         conn.close()
 
 
-# ---------------------------------------------------------------------------
 # Deleting old backups
-# ---------------------------------------------------------------------------
 
 def delete_backup(zip_path: str):
     """Deletes backup file. Can not be undone."""

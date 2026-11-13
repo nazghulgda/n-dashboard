@@ -1,0 +1,6 @@
+# Libraries of the application (all of them go into the built executable).
+# PyInstaller isn't listed here; the setup scripts install it.
+platformdirs==4.14.5
+filelock==4.2.10
+# Drag and drop of files; the application works without it if its Tk extension can't load
+tkinterdnd2==0.7.0

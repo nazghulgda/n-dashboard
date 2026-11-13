@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- WinDashboard icon: three kanban columns. tools/make_icons.py draws the same
+       geometry with Pillow to produce assets/app.ico and assets/png/app-*.png -->
+  <rect x="32" y="32" width="960" height="960" rx="200" fill="#1a56db"/>
+  <rect x="152" y="212" width="200" height="600" rx="48" fill="#ffffff"/>
+  <rect x="412" y="212" width="200" height="440" rx="48" fill="#ffffff"/>
+  <rect x="672" y="212" width="200" height="280" rx="48" fill="#ffffff"/>
+  <rect x="152" y="732" width="200" height="80" rx="40" fill="#f5a623"/>
+</svg>

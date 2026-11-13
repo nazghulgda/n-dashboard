@@ -1,11 +1,10 @@
-# task_window.py — single task window
+# Window of a single task, the note editor and their dialogs
 
 import tkinter as tk
 from tkinter import messagebox, filedialog
 import os
 import re
 import shutil
-from datetime import datetime
 
 from database import (
     get_task, get_checkpoints, set_checkpoint_completed, set_iteration_count,
@@ -14,21 +13,19 @@ from database import (
     get_links, create_link, update_link, delete_link,
     update_task,
     add_checkpoint, delete_checkpoint, update_checkpoint, move_checkpoint,
-    get_attachments, create_attachment, soft_delete_attachment,
-    get_attachment_dir, resolve_attachment_path,
+    get_attachments, create_attachment, soft_delete_attachment, restore_attachment,
+    get_attachment_dir, resolve_attachment_path, unique_path, duplicate_task,
+    checkpoint_progress,
 )
-from theme import get_colors
+from ui_helpers import (
+    COLORS, FONT_HEADING, FONT_BODY, FONT_SMALL, font, mono_font,
+    Dialog, make_button, make_icon_button, bind_hover, make_tooltip,
+    make_scroll_area, widget_alive, open_path, grab_when_visible,
+    remember_geometry, parse_due_date, due_text, due_color, DUE_DATE_HINT,
+    enable_file_drop, drop_available,
+)
 
-# ---------------------------------------------------------------------------
-# Palette — from the active theme (theme.py)
-# ---------------------------------------------------------------------------
-
-COLORS = get_colors()
-
-FONT_TITLE   = ("Segoe UI", 16, "bold")
-FONT_HEADING = ("Segoe UI", 11, "bold")
-FONT_BODY    = ("Segoe UI", 10)
-FONT_SMALL   = ("Segoe UI", 8)
+FONT_TITLE = font(16, "bold")
 
 HIGHLIGHT_COLORS = [
     ("#FFD700", "Yellow"),
@@ -39,24 +36,25 @@ HIGHLIGHT_COLORS = [
     ("#FFA500", "Orange"),
 ]
 
-# ---------------------------------------------------------------------------
+CHECKPOINT_TYPES = [("check", "Checkbox"), ("counter", "Counter (+/−)")]
+
 # Main task window
-# ---------------------------------------------------------------------------
 
 class TaskWindow:
-    def __init__(self, parent, task_id: int, on_close=None):
+    def __init__(self, parent, task_id: int, on_close=None, open_task=None):
         self.task_id  = task_id
         self.on_close = on_close
+        self.open_task = open_task   # function(task_id) opening another task (duplicate)
         self.task     = get_task(task_id)
         if not self.task:
-            messagebox.showerror("Error", f"Task #{task_id} does not exist.")
+            messagebox.showerror("Error", f"Task #{task_id} does not exist.", parent=parent)
             return
 
         self.window = tk.Toplevel(parent)
         self.window.title(self.task["title"])
         self.window.configure(bg=COLORS["bg"])
-        self.window.geometry("1100x700")
         self.window.minsize(800, 500)
+        remember_geometry(self.window, "task", "1100x700", size_only=True)
 
         self.window.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -65,12 +63,9 @@ class TaskWindow:
         self._build_ui()
         self._load_all()
 
-    # -----------------------------------------------------------------------
     # Building layout
-    # -----------------------------------------------------------------------
 
     def _build_ui(self):
-        # Header
         header = tk.Frame(self.window, bg=COLORS["panel"])
         header.pack(fill="x")
 
@@ -90,15 +85,15 @@ class TaskWindow:
         if self.task.get("description"):
             self.desc_label.pack(side="left")
 
-        edit_btn = tk.Label(
-            header, text="✏", font=FONT_BODY,
-            bg=COLORS["panel"], fg=COLORS["text_dim"],
-            padx=10, pady=12, cursor="hand2"
-        )
-        edit_btn.pack(side="left", padx=(4, 0))
-        edit_btn.bind("<Button-1>", lambda e: self._edit_task_info())
-        edit_btn.bind("<Enter>", lambda e: edit_btn.config(fg=COLORS["accent"]))
-        edit_btn.bind("<Leave>", lambda e: edit_btn.config(fg=COLORS["text_dim"]))
+        self.edit_btn = make_icon_button(header, "✏", self._edit_task_info,
+                                         bg=COLORS["panel"], font=FONT_BODY, padx=10)
+        self.edit_btn.pack(side="left", padx=(4, 0))
+
+        make_button(header, "Duplicate", self._duplicate, kind="secondary",
+                    small=True).pack(side="right", padx=12)
+        self.due_label = tk.Label(header, text="", font=font(9, "bold"),
+                                  bg=COLORS["panel"], fg=COLORS["text_dim"], padx=8)
+        self.due_label.pack(side="right")
 
         tk.Frame(self.window, bg=COLORS["accent"], height=2).pack(fill="x")
 
@@ -130,9 +125,7 @@ class TaskWindow:
         self.attachments_frame.grid(row=0, column=1, sticky="new", padx=(6, 0))
         self._build_attachments_panel(self.attachments_frame)
 
-    # -----------------------------------------------------------------------
     # Panel: Kanban
-    # -----------------------------------------------------------------------
 
     def _build_kanban_panel(self, parent):
         parent.columnconfigure(0, weight=1)
@@ -149,25 +142,9 @@ class TaskWindow:
         )
         self.progress_label.pack(side="right")
 
-        container = tk.Frame(parent, bg=COLORS["bg"])
+        container, canvas, self.checkpoints_inner = make_scroll_area(parent)
         container.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
-        container.rowconfigure(0, weight=1)
-        container.columnconfigure(0, weight=1)
-
-        canvas = tk.Canvas(container, bg=COLORS["bg"], highlightthickness=0, bd=0)
-        sb = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=sb.set)
-        sb.grid(row=0, column=1, sticky="ns")
-        canvas.grid(row=0, column=0, sticky="nsew")
-
-        self._checkpoints_canvas = canvas  # reference saved
-
-        self.checkpoints_inner = tk.Frame(canvas, bg=COLORS["bg"])
-        win_id = canvas.create_window((0, 0), window=self.checkpoints_inner, anchor="nw")
-
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
-        self.checkpoints_inner.bind("<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        self._checkpoints_canvas = canvas
 
     def _load_kanban(self):
         for w in self.checkpoints_inner.winfo_children():
@@ -177,6 +154,9 @@ class TaskWindow:
         checkpoints_count = len(checkpoints)
         status = get_task_checkpoint_status(self.task_id)
         self.progress_label.config(text=status)
+        done, total = checkpoint_progress(checkpoints)
+        self._finished = total > 0 and done == total
+        self._update_due_label()
 
         self._checkpoint_vars = {}
 
@@ -199,20 +179,10 @@ class TaskWindow:
                 else:
                     self._make_check_row(row, checkpoint, checkpoints_count)
 
-        # Checkpoint addition button
         add_frame = tk.Frame(self.checkpoints_inner, bg=COLORS["bg"], pady=4)
         add_frame.pack(fill="x", pady=(6, 0))
-        add_btn = tk.Label(
-            add_frame, text="+ Add Checkpoint", font=FONT_SMALL,
-            bg=COLORS["btn_secondary"], fg=COLORS["text_dim"],
-            padx=12, pady=5, cursor="hand2"
-        )
-        add_btn.pack(side="left", padx=10)
-        add_btn.bind("<Button-1>", lambda e: self._add_checkpoint())
-        add_btn.bind("<Enter>",
-            lambda e: add_btn.config(bg=COLORS["card_hover"], fg=COLORS["text"]))
-        add_btn.bind("<Leave>",
-            lambda e: add_btn.config(bg=COLORS["btn_secondary"], fg=COLORS["text_dim"]))
+        make_button(add_frame, "+ Add Checkpoint", self._add_checkpoint,
+                    kind="secondary", small=True).pack(side="left", padx=10)
 
     def _make_check_row(self, row: tk.Frame, checkpoint: dict, checkpoints_count: int):
         is_done = bool(checkpoint["completed"])
@@ -249,7 +219,7 @@ class TaskWindow:
         minus.pack(side="left")
 
         count_lbl = tk.Label(
-            row, text=f"× {count}", font=("Consolas", 10, "bold"),
+            row, text=f"× {count}", font=mono_font(10, "bold"),
             bg=bg, fg=COLORS["accent2"] if is_done else COLORS["text_dim"],
             width=5, anchor="center"
         )
@@ -273,8 +243,7 @@ class TaskWindow:
         def change(delta, sid=checkpoint["id"]):
             current_checkpoints = get_checkpoints(self.task_id)
             current = next((s["iteration_count"] for s in current_checkpoints if s["id"] == sid), 0)
-            new_count = max(0, current + delta)
-            set_iteration_count(sid, new_count)
+            set_iteration_count(sid, max(0, current + delta))
             self._reload_kanban_keep_scroll()
 
         minus.bind("<Button-1>", lambda e: change(-1))
@@ -291,47 +260,33 @@ class TaskWindow:
         ctrl = tk.Frame(row, bg=bg)
         ctrl.pack(side="right")
 
-        # Edit button
-        edit_btn = tk.Label(
-            ctrl, text="✏", font=FONT_SMALL, bg=bg,
-            fg=COLORS["text_dim"], padx=6, cursor="hand2"
-        )
-        edit_btn.pack(side="right")
-        edit_btn.bind("<Button-1>", lambda e, s=dict(checkpoint): self._edit_checkpoint(s))
-        edit_btn.bind("<Enter>", lambda e: edit_btn.config(fg=COLORS["accent"]))
-        edit_btn.bind("<Leave>", lambda e: edit_btn.config(fg=COLORS["text_dim"]))
+        # When it was completed (a counter: when it was used the last time)
+        if checkpoint.get("completed_at") and checkpoint["completed"]:
+            prefix = "last " if checkpoint.get("checkpoint_type") == "counter" else ""
+            tk.Label(row, text=prefix + checkpoint["completed_at"][:10], font=FONT_SMALL,
+                     bg=bg, fg=COLORS["text_dim"]).pack(side="right", padx=(0, 8))
 
-        # Down button
-        can_down = order < checkpoints_count
-        down_btn = tk.Label(
-            ctrl, text="▼", font=("Segoe UI", 7), bg=bg,
-            fg=COLORS["text_dim"] if can_down else bg,
-            padx=2, cursor="hand2" if can_down else ""
-        )
-        down_btn.pack(side="right")
-        if can_down:
-            down_btn.bind("<Button-1>",
-                lambda e, sid=checkpoint["id"]: self._move_checkpoint(sid, "down"))
-            down_btn.bind("<Enter>", lambda e: down_btn.config(fg=COLORS["text"]))
-            down_btn.bind("<Leave>", lambda e: down_btn.config(fg=COLORS["text_dim"]))
+        make_icon_button(
+            ctrl, "✏",
+            lambda s=dict(checkpoint): self._edit_checkpoint(s, checkpoints_count),
+            bg=bg
+        ).pack(side="right")
 
-        # Up button
-        can_up = order > 1
-        up_btn = tk.Label(
-            ctrl, text="▲", font=("Segoe UI", 7), bg=bg,
-            fg=COLORS["text_dim"] if can_up else bg,
-            padx=2, cursor="hand2" if can_up else ""
-        )
-        up_btn.pack(side="right")
-        if can_up:
-            up_btn.bind("<Button-1>",
-                lambda e, sid=checkpoint["id"]: self._move_checkpoint(sid, "up"))
-            up_btn.bind("<Enter>", lambda e: up_btn.config(fg=COLORS["text"]))
-            up_btn.bind("<Leave>", lambda e: up_btn.config(fg=COLORS["text_dim"]))
+        # Arrows: an arrow which can not be used is invisible (text in background color)
+        arrow_font = font(7)
+        for symbol, direction, enabled in (("▼", "down", order < checkpoints_count),
+                                           ("▲", "up",   order > 1)):
+            if enabled:
+                make_icon_button(
+                    ctrl, symbol,
+                    lambda sid=checkpoint["id"], d=direction: self._move_checkpoint(sid, d),
+                    bg=bg, font=arrow_font, padx=2
+                ).pack(side="right")
+            else:
+                tk.Label(ctrl, text=symbol, font=arrow_font, bg=bg, fg=bg,
+                         padx=2).pack(side="right")
 
-    # -----------------------------------------------------------------------
     # Kanban actions
-    # -----------------------------------------------------------------------
 
     def _reload_kanban_keep_scroll(self):
         """Reloads the kanban board while keeping the scroll position."""
@@ -346,31 +301,21 @@ class TaskWindow:
         self._reload_kanban_keep_scroll()
 
     def _move_checkpoint(self, checkpoint_id: int, direction: str):
-        yview = self._checkpoints_canvas.yview() if self._checkpoints_canvas else (0.0, 1.0)
         move_checkpoint(self.task_id, checkpoint_id, direction)
-        self._load_kanban()
-        if self._checkpoints_canvas and yview[0] > 0:
-            self._checkpoints_canvas.after(10,
-                lambda y=yview[0]: self._checkpoints_canvas.yview_moveto(y))
+        self._reload_kanban_keep_scroll()
 
-    def _edit_checkpoint(self, checkpoint: dict):
-        dialog = CheckpointEditDialog(self.window, checkpoint)
+    def _edit_checkpoint(self, checkpoint: dict, checkpoints_count: int):
+        dialog = CheckpointDialog(self.window, checkpoint, can_delete=checkpoints_count > 1)
         self.window.wait_window(dialog.window)
         if dialog.result == "deleted":
-            if not delete_checkpoint(checkpoint["id"]):
-                messagebox.showinfo(
-                    "Delete Checkpoint",
-                    "The last checkpoint of a task can not be deleted.\n\n"
-                    "A task needs at least one checkpoint to be finished.",
-                    parent=self.window
-                )
-            self._load_kanban()
+            delete_checkpoint(checkpoint["id"])
+            self._reload_kanban_keep_scroll()
         elif dialog.result:
             update_checkpoint(checkpoint["id"], dialog.result["name"], dialog.result["checkpoint_type"])
             self._reload_kanban_keep_scroll()
 
     def _add_checkpoint(self):
-        dialog = AddCheckpointDialog(self.window)
+        dialog = CheckpointDialog(self.window)
         self.window.wait_window(dialog.window)
         if dialog.result:
             add_checkpoint(self.task_id, dialog.result["name"], dialog.result["checkpoint_type"])
@@ -380,9 +325,7 @@ class TaskWindow:
                 self._checkpoints_canvas.after(50,
                     lambda: self._checkpoints_canvas.yview_moveto(1.0))
 
-    # -----------------------------------------------------------------------
     # Panel: Notes
-    # -----------------------------------------------------------------------
 
     def _build_notes_panel(self, parent):
         parent.columnconfigure(0, weight=1)
@@ -393,34 +336,10 @@ class TaskWindow:
         tk.Label(hdr, text="NOTES", font=FONT_HEADING,
                  bg=COLORS["panel"], fg=COLORS["accent"],
                  padx=12, pady=8).pack(side="left")
+        make_button(hdr, "+ New", self._new_note, small=True).pack(side="right", padx=8, pady=6)
 
-        add_btn = tk.Label(
-            hdr, text="+ New", font=FONT_SMALL,
-            bg=COLORS["btn"], fg="white",
-            padx=8, pady=4, cursor="hand2"
-        )
-        add_btn.pack(side="right", padx=8, pady=6)
-        add_btn.bind("<Button-1>", lambda e: self._new_note())
-        add_btn.bind("<Enter>", lambda e: add_btn.config(bg=COLORS["btn_hover"]))
-        add_btn.bind("<Leave>", lambda e: add_btn.config(bg=COLORS["btn"]))
-
-        container = tk.Frame(parent, bg=COLORS["bg"])
+        container, _, self.notes_inner = make_scroll_area(parent)
         container.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
-        container.rowconfigure(0, weight=1)
-        container.columnconfigure(0, weight=1)
-
-        canvas = tk.Canvas(container, bg=COLORS["bg"], highlightthickness=0, bd=0)
-        sb = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=sb.set)
-        sb.grid(row=0, column=1, sticky="ns")
-        canvas.grid(row=0, column=0, sticky="nsew")
-
-        self.notes_inner = tk.Frame(canvas, bg=COLORS["bg"])
-        win_id = canvas.create_window((0, 0), window=self.notes_inner, anchor="nw")
-
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
-        self.notes_inner.bind("<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
     def _load_notes(self):
         for w in self.notes_inner.winfo_children():
@@ -451,68 +370,61 @@ class TaskWindow:
                              bg=COLORS["card"], fg=COLORS["text"], anchor="w")
         title_lbl.pack(side="left", fill="x", expand=True)
 
-        edit_title_btn = tk.Label(header_row, text="✏", font=FONT_SMALL,
-                                  bg=COLORS["card"], fg=COLORS["text_dim"],
-                                  padx=6, cursor="hand2")
+        edit_title_btn = make_icon_button(
+            header_row, "✏",
+            lambda n=note, lbl=title_lbl: self._edit_note_title(n, lbl),
+            bg=COLORS["card"]
+        )
         edit_title_btn.pack(side="right")
-        edit_title_btn.bind("<Button-1>",
-            lambda e, n=note, lbl=title_lbl: self._edit_note_title(n, lbl))
-        edit_title_btn.bind("<Enter>", lambda e: edit_title_btn.config(fg=COLORS["accent"]))
-        edit_title_btn.bind("<Leave>", lambda e: edit_title_btn.config(fg=COLORS["text_dim"]))
 
-        # Data: updated if different from created, otherwise created
+        # Date: updated if different from created, otherwise created
         if note.get("updated_at") and note["updated_at"] != note["created_at"]:
             dt_str = "updated: " + note["updated_at"][:16].replace("T", " ")
         else:
             dt_str = note["created_at"][:16].replace("T", " ")
-        tk.Label(header_row, text=dt_str, font=FONT_SMALL,
-                 bg=COLORS["card"], fg=COLORS["text_dim"]).pack(side="right", padx=(0, 4))
+        date_lbl = tk.Label(header_row, text=dt_str, font=FONT_SMALL,
+                            bg=COLORS["card"], fg=COLORS["text_dim"])
+        date_lbl.pack(side="right", padx=(0, 4))
 
         # Lines 2-3: note content preview
+        preview_lbl = None
         preview = _note_preview(note.get("content") or "")
         if preview:
-            tk.Label(row, text=preview, font=FONT_SMALL,
-                     bg=COLORS["card"], fg=COLORS["text_dim"],
-                     anchor="w", justify="left").pack(fill="x", pady=(2, 0))
+            preview_lbl = tk.Label(row, text=preview, font=FONT_SMALL,
+                                   bg=COLORS["card"], fg=COLORS["text_dim"],
+                                   anchor="w", justify="left")
+            preview_lbl.pack(fill="x", pady=(2, 0))
 
         def open_note(e, n=note):
             nid = n["id"]
-            if nid in self._open_note_windows:
-                try:
-                    w = self._open_note_windows[nid]
-                    if w.window.winfo_exists():
-                        w.window.lift()
-                        return
-                except Exception:
-                    pass
+            editor = self._open_note_windows.get(nid)
+            if editor is not None and widget_alive(editor):
+                editor.window.lift()
+                return
+
             def on_note_close(note_id=nid):
                 self._open_note_windows.pop(note_id, None)
                 self._load_notes()
-            editor = NoteEditorWindow(self.window, n,
-                on_save=self._load_notes,
-                on_close=on_note_close)
-            self._open_note_windows[nid] = editor
 
-        row.bind("<Button-1>", open_note)
-        for child in row.winfo_children():
-            if child is not edit_title_btn and child is not header_row:
-                child.bind("<Button-1>", open_note)
-        title_lbl.bind("<Button-1>", open_note)
+            self._open_note_windows[nid] = NoteEditorWindow(
+                self.window, n, on_save=self._load_notes, on_close=on_note_close)
 
-        def on_enter(e, r=row): _set_bg(r, COLORS["card_hover"])
-        def on_leave(e, r=row): _set_bg(r, COLORS["card"])
-        row.bind("<Enter>", on_enter)
-        row.bind("<Leave>", on_leave)
+        # Click anywhere on the row except the edit icon opens the note
+        for w in (row, header_row, title_lbl, date_lbl, preview_lbl):
+            if w is not None:
+                w.bind("<Button-1>", open_note)
+
+        bind_hover(row, COLORS["card"], COLORS["card_hover"])
 
     def _new_note(self):
-        dialog = NewNoteDialog(self.window)
+        dialog = NoteTitleDialog(self.window, "New Note", ok_text="Create")
         self.window.wait_window(dialog.window)
         if dialog.result:
-            create_note(self.task_id, dialog.result["title"])
+            create_note(self.task_id, dialog.result)
             self._load_notes()
 
     def _edit_note_title(self, note: dict, title_lbl: tk.Label):
-        dialog = EditNoteTitleDialog(self.window, note["title"])
+        dialog = NoteTitleDialog(self.window, "Edit Note Title", note["title"])
         self.window.wait_window(dialog.window)
         if dialog.result:
             new_title = dialog.result
@@ -521,12 +433,10 @@ class TaskWindow:
             title_lbl.config(text=new_title)
             # Note opened in the editor shows the new title as well
             editor = self._open_note_windows.get(note["id"])
-            if editor is not None and _editor_alive(editor):
+            if editor is not None and widget_alive(editor):
                 editor.set_title(new_title)
 
-    # -----------------------------------------------------------------------
     # Panel: Links
-    # -----------------------------------------------------------------------
 
     def _build_links_panel(self, parent):
         parent.columnconfigure(0, weight=1)
@@ -540,15 +450,8 @@ class TaskWindow:
                  padx=12, pady=6).pack(side="left")
 
         for label, ltype in [("+ File", "file"), ("+ Folder", "folder")]:
-            btn = tk.Label(
-                hdr, text=label, font=FONT_SMALL,
-                bg=COLORS["btn"], fg="white",
-                padx=8, pady=4, cursor="hand2"
-            )
-            btn.pack(side="right", padx=(4, 8), pady=4)
-            btn.bind("<Button-1>", lambda e, t=ltype: self._add_link(t))
-            btn.bind("<Enter>", lambda e, b=btn: b.config(bg=COLORS["btn_hover"]))
-            btn.bind("<Leave>", lambda e, b=btn: b.config(bg=COLORS["btn"]))
+            make_button(hdr, label, lambda t=ltype: self._add_link(t),
+                        small=True).pack(side="right", padx=(4, 8), pady=4)
 
         self.links_container = tk.Frame(parent, bg=COLORS["bg"])
         self.links_container.pack(fill="x", pady=(4, 0))
@@ -560,64 +463,60 @@ class TaskWindow:
         links = get_links(self.task_id)
 
         if not links:
+            text = ("No links. Add a file or folder, or drop it here." if drop_available()
+                    else "No links available. Add a file or folder.")
             tk.Label(
-                self.links_container, text="No links available. Add a file or folder.",
+                self.links_container, text=text,
                 font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["text_dim"],
                 pady=6
             ).pack(side="left")
-            return
+        else:
+            for link in links:
+                self._make_link_chip(link)
+        enable_file_drop(self.links_frame, self._drop_links)
 
-        for link in links:
-            self._make_link_chip(link)
+    def _drop_links(self, paths: list):
+        """Files and folders dropped on the links panel become links."""
+        for path in paths:
+            path = os.path.normpath(path)
+            link_type = "folder" if os.path.isdir(path) else "file"
+            create_link(self.task_id, os.path.basename(path) or path, path, link_type)
+        self._load_links()
 
-    def _make_link_chip(self, link: dict):
-        icon = "📁" if link["link_type"] == "folder" else "📄"
-
-        chip = tk.Frame(
-            self.links_container, bg=COLORS["card"],
-            padx=8, pady=4, cursor="hand2"
-        )
+    def _make_chip(self, container, text: str, tooltip: str, on_open, buttons: list):
+        """Chip of a link or an attachment: click opens it, buttons = [(icon, command, font)]."""
+        chip = tk.Frame(container, bg=COLORS["card"], padx=8, pady=4, cursor="hand2")
         chip.pack(side="left", padx=4, pady=4)
 
-        label_lbl = tk.Label(
-            chip, text=f"{icon} {link['label']}",
-            font=FONT_SMALL, bg=COLORS["card"], fg=COLORS["text"]
-        )
+        label_lbl = tk.Label(chip, text=text, font=FONT_SMALL,
+                             bg=COLORS["card"], fg=COLORS["text"])
         label_lbl.pack(side="left")
 
-        edit_btn = tk.Label(
-            chip, text="✏", font=FONT_SMALL,
-            bg=COLORS["card"], fg=COLORS["text_dim"],
-            cursor="hand2", padx=3
-        )
-        edit_btn.pack(side="left")
-        edit_btn.bind("<Button-1>", lambda e, l=dict(link): self._edit_link(l))
-        edit_btn.bind("<Enter>", lambda e: edit_btn.config(fg=COLORS["accent"]))
-        edit_btn.bind("<Leave>", lambda e: edit_btn.config(fg=COLORS["text_dim"]))
+        for icon, command, icon_font in buttons:
+            make_icon_button(chip, icon, command, bg=COLORS["card"],
+                             font=icon_font, padx=3).pack(side="left")
 
-        del_btn = tk.Label(
-            chip, text="×", font=FONT_BODY,
-            bg=COLORS["card"], fg=COLORS["text_dim"],
-            cursor="hand2", padx=3
-        )
-        del_btn.pack(side="left")
-        del_btn.bind("<Button-1>", lambda e, l=dict(link): self._delete_link(l))
-        del_btn.bind("<Enter>", lambda e: del_btn.config(fg=COLORS["accent"]))
-        del_btn.bind("<Leave>", lambda e: del_btn.config(fg=COLORS["text_dim"]))
-
-        _make_tooltip(chip, link["path"])
+        make_tooltip(chip, tooltip)
         for child in chip.winfo_children():
-            _make_tooltip(child, link["path"])
+            make_tooltip(child, tooltip)
 
         # Click on chip (outside buttons) opens the path
-        non_btn = [label_lbl, chip]
-        for w in non_btn:
-            w.bind("<Button-1>", lambda e, p=link["path"], t=link["link_type"]: _open_path(p, t))
+        for w in (chip, label_lbl):
+            w.bind("<Button-1>", lambda e: on_open())
 
-        def on_enter(e, c=chip): _set_bg(c, COLORS["card_hover"])
-        def on_leave(e, c=chip): _set_bg(c, COLORS["card"])
-        chip.bind("<Enter>", on_enter)
-        chip.bind("<Leave>", on_leave)
+        bind_hover(chip, COLORS["card"], COLORS["card_hover"])
+
+    def _make_link_chip(self, link: dict):
+        # A folder is marked with a trailing slash, like in a file listing
+        text = f"{link['label']}/" if link["link_type"] == "folder" else link["label"]
+        self._make_chip(
+            self.links_container, text, link["path"],
+            on_open=lambda p=link["path"]: open_path(p, parent=self.window),
+            buttons=[
+                ("✏", lambda l=dict(link): self._edit_link(l), FONT_SMALL),
+                ("×", lambda l=dict(link): self._delete_link(l), FONT_BODY),
+            ]
+        )
 
     def _edit_link(self, link: dict):
         dialog = LinkEditDialog(self.window, link)
@@ -652,9 +551,7 @@ class TaskWindow:
         delete_link(link["id"])
         self._load_links()
 
-    # -----------------------------------------------------------------------
     # Panel: Attachments
-    # -----------------------------------------------------------------------
 
     def _build_attachments_panel(self, parent):
         parent.columnconfigure(0, weight=1)
@@ -666,16 +563,10 @@ class TaskWindow:
         tk.Label(hdr, text="ATTACHMENTS", font=FONT_HEADING,
                  bg=COLORS["panel"], fg=COLORS["accent"],
                  padx=12, pady=6).pack(side="left")
-
-        add_btn = tk.Label(
-            hdr, text="+ Add file", font=FONT_SMALL,
-            bg=COLORS["btn"], fg="white",
-            padx=8, pady=4, cursor="hand2"
-        )
-        add_btn.pack(side="right", padx=(4, 8), pady=4)
-        add_btn.bind("<Button-1>", lambda e: self._add_attachment())
-        add_btn.bind("<Enter>", lambda e: add_btn.config(bg=COLORS["btn_hover"]))
-        add_btn.bind("<Leave>", lambda e: add_btn.config(bg=COLORS["btn"]))
+        make_button(hdr, "+ Add file", self._add_attachment,
+                    small=True).pack(side="right", padx=(4, 8), pady=4)
+        self.deleted_btn = make_button(hdr, "", self._show_deleted_attachments,
+                                       kind="secondary", small=True)
 
         self.attachments_container = tk.Frame(parent, bg=COLORS["bg"])
         self.attachments_container.pack(fill="x", pady=(4, 0))
@@ -684,55 +575,37 @@ class TaskWindow:
         for w in self.attachments_container.winfo_children():
             w.destroy()
 
-        attachments = get_attachments(self.task_id)
+        all_attachments = get_attachments(self.task_id, include_deleted=True)
+        attachments = [a for a in all_attachments if not a["deleted"]]
+        deleted_count = len(all_attachments) - len(attachments)
+
+        # "Deleted (N)" only when there is something to restore
+        if deleted_count:
+            self.deleted_btn.config(text=f"Deleted ({deleted_count})")
+            self.deleted_btn.pack(side="right", padx=(4, 0), pady=4)
+        else:
+            self.deleted_btn.pack_forget()
 
         if not attachments:
+            text = ("No attachments. Add files or drop them here." if drop_available()
+                    else "No attachments.")
             tk.Label(
-                self.attachments_container, text="No attachments.",
+                self.attachments_container, text=text,
                 font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["text_dim"],
                 pady=6
             ).pack(side="left")
-            return
-
-        for att in attachments:
-            self._make_attachment_chip(att)
+        else:
+            for att in attachments:
+                self._make_attachment_chip(att)
+        enable_file_drop(self.attachments_frame, self._attach_files)
 
     def _make_attachment_chip(self, att: dict):
         path = resolve_attachment_path(att["stored_path"])
-
-        chip = tk.Frame(
-            self.attachments_container, bg=COLORS["card"],
-            padx=8, pady=4, cursor="hand2"
+        self._make_chip(
+            self.attachments_container, att['filename'], path,
+            on_open=lambda p=path: open_path(p, parent=self.window),
+            buttons=[("×", lambda a=dict(att): self._delete_attachment(a), FONT_BODY)]
         )
-        chip.pack(side="left", padx=4, pady=4)
-
-        label_lbl = tk.Label(
-            chip, text=f"📎 {att['filename']}",
-            font=FONT_SMALL, bg=COLORS["card"], fg=COLORS["text"]
-        )
-        label_lbl.pack(side="left")
-
-        del_btn = tk.Label(
-            chip, text="×", font=FONT_BODY,
-            bg=COLORS["card"], fg=COLORS["text_dim"],
-            cursor="hand2", padx=3
-        )
-        del_btn.pack(side="left")
-        del_btn.bind("<Button-1>", lambda e, a=dict(att): self._delete_attachment(a))
-        del_btn.bind("<Enter>", lambda e: del_btn.config(fg=COLORS["accent"]))
-        del_btn.bind("<Leave>", lambda e: del_btn.config(fg=COLORS["text_dim"]))
-
-        _make_tooltip(chip, path)
-        _make_tooltip(label_lbl, path)
-
-        # Click on chip (outside buttons) opens the file
-        for w in [label_lbl, chip]:
-            w.bind("<Button-1>", lambda e, p=path: _open_path(p, "file"))
-
-        def on_enter(e, c=chip): _set_bg(c, COLORS["card_hover"])
-        def on_leave(e, c=chip): _set_bg(c, COLORS["card"])
-        chip.bind("<Enter>", on_enter)
-        chip.bind("<Leave>", on_leave)
 
     def _attachments_dir(self) -> str:
         """Returns attachments folder of this task. A folder which the task already
@@ -746,6 +619,20 @@ class TaskWindow:
 
     def _add_attachment(self):
         paths = filedialog.askopenfilenames(title="Select Files to Attach", parent=self.window)
+        if paths:
+            self._attach_files(paths)
+
+    def _attach_files(self, paths):
+        """Copies files into the attachments folder of the task (dialog or drag and drop)."""
+        folders = [p for p in paths if os.path.isdir(p)]
+        paths = [p for p in paths if not os.path.isdir(p)]
+        if folders:
+            messagebox.showinfo(
+                "Attachments",
+                "Folders can't be attached. Add them as links instead:\n\n"
+                + "\n".join(folders),
+                parent=self.window
+            )
         if not paths:
             return
 
@@ -753,18 +640,10 @@ class TaskWindow:
         os.makedirs(task_dir, exist_ok=True)
 
         for src_path in paths:
-            filename  = os.path.basename(src_path)
-            dest_path = os.path.join(task_dir, filename)
-
-            # If a file with the same name already exists — add a time suffix
-            if os.path.exists(dest_path):
-                base, ext = os.path.splitext(filename)
-                filename  = f"{base}_{datetime.now().strftime('%H%M%S')}{ext}"
-                dest_path = os.path.join(task_dir, filename)
-
+            dest_path = unique_path(os.path.join(task_dir, os.path.basename(src_path)))
             try:
                 shutil.copy2(src_path, dest_path)
-                create_attachment(self.task_id, filename, dest_path)
+                create_attachment(self.task_id, os.path.basename(dest_path), dest_path)
             except Exception as ex:
                 messagebox.showerror(
                     "Error",
@@ -778,24 +657,20 @@ class TaskWindow:
         if not messagebox.askyesno(
             "Delete Attachment",
             f"Delete attachment?\n\n{att['filename']}\n\n"
-            "The file will be moved to the 'deleted' folder — "
-            "you can manually recover it from there.",
+            "The file will be moved to the 'deleted' folder; "
+            "you can restore it later with the 'Deleted' button.",
             parent=self.window
         ):
             return
 
         src = resolve_attachment_path(att["stored_path"])
         deleted_dir = os.path.join(os.path.dirname(src), "deleted")
-        dest = os.path.join(deleted_dir, os.path.basename(src))
 
         try:
             os.makedirs(deleted_dir, exist_ok=True)
-            if os.path.exists(dest):
-                base, ext = os.path.splitext(os.path.basename(src))
-                dest = os.path.join(
-                    deleted_dir, f"{base}_{datetime.now().strftime('%H%M%S')}{ext}")
+            dest = unique_path(os.path.join(deleted_dir, os.path.basename(src)))
             if os.path.exists(src):
-                os.rename(src, dest)
+                os.replace(src, dest)
             soft_delete_attachment(att["id"], dest)
         except Exception as ex:
             messagebox.showerror(
@@ -807,9 +682,33 @@ class TaskWindow:
 
         self._load_attachments()
 
-    # -----------------------------------------------------------------------
+    def _show_deleted_attachments(self):
+        dialog = DeletedAttachmentsDialog(self.window, self.task_id)
+        self.window.wait_window(dialog.window)
+        if dialog.changed:
+            self._load_attachments()
+
+    # Due date, duplicate
+
+    def _update_due_label(self):
+        due = self.task.get("due_date")
+        finished = getattr(self, "_finished", False)
+        self.due_label.config(text=due_text(due, finished), fg=due_color(due, finished))
+
+    def _duplicate(self):
+        if not messagebox.askyesno(
+            "Duplicate Task",
+            f"Create a copy of \"{self.task['title']}\"?\n\n"
+            "The copy gets the description, due date, checkpoints (not completed) and links. "
+            "Notes and attachments are not copied.",
+            parent=self.window
+        ):
+            return
+        new_id = duplicate_task(self.task_id)
+        if new_id and self.open_task:
+            self.open_task(new_id)
+
     # Loading Everything / closing
-    # -----------------------------------------------------------------------
 
     def _load_all(self):
         self._load_kanban()
@@ -820,7 +719,7 @@ class TaskWindow:
     def _note_editors(self) -> list:
         """Returns note editor windows which are open now."""
         self._open_note_windows = {nid: ed for nid, ed in self._open_note_windows.items()
-                                   if _editor_alive(ed)}
+                                   if widget_alive(ed)}
         return list(self._open_note_windows.values())
 
     def rebuild(self):
@@ -854,7 +753,7 @@ class TaskWindow:
             editor.save_if_changed()
 
     def close(self):
-        """Closes the window. Notes are never lost — unsaved changes are saved first."""
+        """Closes the window; unsaved notes are saved first."""
         self.save_open_notes()
         if self.on_close:
             self.on_close()
@@ -862,105 +761,56 @@ class TaskWindow:
 
     def _edit_task_info(self):
         dialog = EditTaskDialog(self.window, self.task["title"],
-                                self.task.get("description") or "")
+                                self.task.get("description") or "",
+                                self.task.get("due_date") or "")
         self.window.wait_window(dialog.window)
         if dialog.result:
             new_title = dialog.result["title"]
             new_desc  = dialog.result["description"]
-            update_task(self.task_id, new_title, new_desc)
+            new_due   = dialog.result["due_date"]
+            update_task(self.task_id, new_title, new_desc, new_due)
             self.task["title"]       = new_title
             self.task["description"] = new_desc
+            self.task["due_date"]    = new_due
+            self._update_due_label()
             self.window.title(new_title)
             self.title_label.config(text=new_title)
             self.desc_label.config(text=new_desc)
             if new_desc:
-                self.desc_label.pack(side="left", padx=(4,0))
+                self.desc_label.pack(side="left", before=self.edit_btn)
             else:
                 self.desc_label.pack_forget()
 
 
-# ---------------------------------------------------------------------------
-# CheckpointEditDialog: Edit Checkpoint (change name, type, delete)
-# ---------------------------------------------------------------------------
+# Dialog: Add / Edit Checkpoint
 
-class CheckpointEditDialog:
-    def __init__(self, parent, checkpoint: dict):
-        self.checkpoint  = checkpoint
-        self.result = None  # None=cancelled, "deleted"=deleted, dict=saved
+class CheckpointDialog(Dialog):
+    """Without checkpoint: adds a new one. With checkpoint: edits its name and type
+    or deletes it. result: None = cancelled, "deleted", or {name, checkpoint_type}."""
 
-        self.window = tk.Toplevel(parent)
-        self.window.title("Edit Checkpoint")
-        self.window.configure(bg=COLORS["bg"])
-        self.window.geometry("420x250")
-        self.window.resizable(False, False)
-        self.window.grab_set()
+    def __init__(self, parent, checkpoint: dict = None, can_delete: bool = True):
+        self.checkpoint = checkpoint
+        super().__init__(parent, "Edit Checkpoint" if checkpoint else "Add Checkpoint")
 
-        tk.Label(self.window, text="Edit Checkpoint", font=FONT_HEADING,
-                 bg=COLORS["bg"], fg=COLORS["accent"],
-                 pady=12, padx=20).pack(anchor="w")
-        tk.Frame(self.window, bg=COLORS["accent"], height=1).pack(fill="x")
+        self.add_label("Checkpoint Name")
+        self.name_var = self.add_entry(checkpoint["name"] if checkpoint else "", focus=True)
 
-        form = tk.Frame(self.window, bg=COLORS["bg"], padx=20, pady=14)
-        form.pack(fill="both", expand=True)
+        self.add_label("Checkpoint Type")
+        self.type_var = self.add_radios(
+            CHECKPOINT_TYPES,
+            checkpoint.get("checkpoint_type", "check") if checkpoint else "check")
 
-        tk.Label(form, text="Checkpoint Name", font=FONT_BODY,
-                 bg=COLORS["bg"], fg=COLORS["text"]).pack(anchor="w")
-        self.name_var = tk.StringVar(value=checkpoint["name"])
-        entry = tk.Entry(form, textvariable=self.name_var, font=FONT_BODY,
-                         bg=COLORS["card"], fg=COLORS["text"],
-                         insertbackground=COLORS["text"], relief="flat")
-        entry.pack(fill="x", ipady=5, pady=(2, 12))
-        entry.focus_set()
-        entry.select_range(0, "end")
+        btn_row = self.add_buttons("Save" if checkpoint else "Add", self._confirm)
 
-        tk.Label(form, text="Checkpoint Type", font=FONT_BODY,
-                 bg=COLORS["bg"], fg=COLORS["text"]).pack(anchor="w")
-        self.type_var = tk.StringVar(value=checkpoint.get("checkpoint_type", "check"))
-        type_row = tk.Frame(form, bg=COLORS["bg"])
-        type_row.pack(anchor="w", pady=(2, 14))
-        radio_style = dict(
-            bg=COLORS["bg"], fg=COLORS["text"],
-            activebackground=COLORS["bg"], activeforeground=COLORS["text"],
-            selectcolor=COLORS["card"], font=FONT_BODY
-        )
-        tk.Radiobutton(type_row, text="Checkbox",
-                       variable=self.type_var, value="check",
-                       **radio_style).pack(side="left", padx=(0, 20))
-        tk.Radiobutton(type_row, text="Counter (+/−)",
-                       variable=self.type_var, value="counter",
-                       **radio_style).pack(side="left")
+        if checkpoint:
+            # A task needs at least one checkpoint to be finished
+            del_btn = make_button(btn_row, "Delete", self._delete,
+                                  kind="danger", enabled=can_delete)
+            del_btn.pack(side="left")
+            if not can_delete:
+                make_tooltip(del_btn, "The last checkpoint of a task can not be deleted.")
 
-        btn_row = tk.Frame(form, bg=COLORS["bg"])
-        btn_row.pack(fill="x")
-
-        # Delete button (left)
-        del_btn = tk.Label(btn_row, text="🗑 Delete Checkpoint", font=FONT_BODY,
-                           bg="#5a1515", fg="#ff9999",
-                           padx=10, pady=6, cursor="hand2")
-        del_btn.pack(side="left")
-        del_btn.bind("<Button-1>", lambda e: self._delete())
-        del_btn.bind("<Enter>", lambda e: del_btn.config(bg="#7a2020"))
-        del_btn.bind("<Leave>", lambda e: del_btn.config(bg="#5a1515"))
-
-        # Cancel + Save (right)
-        cancel = tk.Label(btn_row, text="Cancel", font=FONT_BODY,
-                          bg=COLORS["btn_secondary"], fg=COLORS["text_dim"],
-                          padx=10, pady=6, cursor="hand2")
-        cancel.pack(side="right", padx=(8, 0))
-        cancel.bind("<Button-1>", lambda e: self.window.destroy())
-
-        save = tk.Label(btn_row, text="Save", font=("Segoe UI", 10, "bold"),
-                        bg=COLORS["btn"], fg="white",
-                        padx=10, pady=6, cursor="hand2")
-        save.pack(side="right")
-        save.bind("<Button-1>", lambda e: self._save())
-        save.bind("<Enter>", lambda e: save.config(bg=COLORS["btn_hover"]))
-        save.bind("<Leave>", lambda e: save.config(bg=COLORS["btn"]))
-
-        self.window.bind("<Return>", lambda e: self._save())
-        self.window.bind("<Escape>", lambda e: self.window.destroy())
-
-    def _save(self):
+    def _confirm(self):
         name = self.name_var.get().strip()
         if not name:
             return
@@ -978,252 +828,16 @@ class CheckpointEditDialog:
             self.window.destroy()
 
 
-# ---------------------------------------------------------------------------
-# Dialog: Add Checkpoint
-# ---------------------------------------------------------------------------
+# Dialog: Note Title (new note / rename)
 
-class AddCheckpointDialog:
-    def __init__(self, parent):
-        self.result = None
+class NoteTitleDialog(Dialog):
+    """result: the entered title, or None if cancelled."""
 
-        self.window = tk.Toplevel(parent)
-        self.window.title("Add Checkpoint")
-        self.window.configure(bg=COLORS["bg"])
-        self.window.geometry("420x220")
-        self.window.resizable(False, False)
-        self.window.grab_set()
-
-        tk.Label(self.window, text="Add Checkpoint", font=FONT_HEADING,
-                 bg=COLORS["bg"], fg=COLORS["accent"],
-                 pady=12, padx=20).pack(anchor="w")
-        tk.Frame(self.window, bg=COLORS["accent"], height=1).pack(fill="x")
-
-        form = tk.Frame(self.window, bg=COLORS["bg"], padx=20, pady=14)
-        form.pack(fill="both", expand=True)
-
-        tk.Label(form, text="Checkpoint Name", font=FONT_BODY,
-                 bg=COLORS["bg"], fg=COLORS["text"]).pack(anchor="w")
-        self.name_var = tk.StringVar()
-        entry = tk.Entry(form, textvariable=self.name_var, font=FONT_BODY,
-                         bg=COLORS["card"], fg=COLORS["text"],
-                         insertbackground=COLORS["text"], relief="flat")
-        entry.pack(fill="x", ipady=5, pady=(2, 12))
-        entry.focus_set()
-
-        tk.Label(form, text="Checkpoint Type", font=FONT_BODY,
-                 bg=COLORS["bg"], fg=COLORS["text"]).pack(anchor="w")
-        self.type_var = tk.StringVar(value="check")
-        type_row = tk.Frame(form, bg=COLORS["bg"])
-        type_row.pack(anchor="w", pady=(2, 14))
-        radio_style = dict(
-            bg=COLORS["bg"], fg=COLORS["text"],
-            activebackground=COLORS["bg"], activeforeground=COLORS["text"],
-            selectcolor=COLORS["card"], font=FONT_BODY
-        )
-        tk.Radiobutton(type_row, text="Checkbox",
-                       variable=self.type_var, value="check",
-                       **radio_style).pack(side="left", padx=(0, 20))
-        tk.Radiobutton(type_row, text="Counter (+/−)",
-                       variable=self.type_var, value="counter",
-                       **radio_style).pack(side="left")
-
-        btn_row = tk.Frame(form, bg=COLORS["bg"])
-        btn_row.pack(fill="x")
-
-        cancel = tk.Label(btn_row, text="Cancel", font=FONT_BODY,
-                          bg=COLORS["btn_secondary"], fg=COLORS["text_dim"],
-                          padx=10, pady=6, cursor="hand2")
-        cancel.pack(side="right", padx=(8, 0))
-        cancel.bind("<Button-1>", lambda e: self.window.destroy())
-
-        add_btn = tk.Label(btn_row, text="Add", font=("Segoe UI", 10, "bold"),
-                           bg=COLORS["btn"], fg="white",
-                           padx=10, pady=6, cursor="hand2")
-        add_btn.pack(side="right")
-        add_btn.bind("<Button-1>", lambda e: self._confirm())
-        add_btn.bind("<Enter>", lambda e: add_btn.config(bg=COLORS["btn_hover"]))
-        add_btn.bind("<Leave>", lambda e: add_btn.config(bg=COLORS["btn"]))
-
-        self.window.bind("<Return>", lambda e: self._confirm())
-        self.window.bind("<Escape>", lambda e: self.window.destroy())
-
-    def _confirm(self):
-        name = self.name_var.get().strip()
-        if not name:
-            return
-        self.result = {"name": name, "checkpoint_type": self.type_var.get()}
-        self.window.destroy()
-
-
-# ---------------------------------------------------------------------------
-# Dialog: New Note (title only)
-# ---------------------------------------------------------------------------
-
-class NewNoteDialog:
-    def __init__(self, parent):
-        self.result = None
-
-        self.window = tk.Toplevel(parent)
-        self.window.title("New Note")
-        self.window.configure(bg=COLORS["bg"])
-        self.window.geometry("400x160")
-        self.window.resizable(False, False)
-        self.window.grab_set()
-
-        tk.Label(
-            self.window, text="Note Title",
-            font=FONT_HEADING, bg=COLORS["bg"],
-            fg=COLORS["accent"], pady=12, padx=20
-        ).pack(anchor="w")
-
-        self.title_var = tk.StringVar()
-        entry = tk.Entry(
-            self.window, textvariable=self.title_var,
-            font=FONT_BODY, bg=COLORS["card"], fg=COLORS["text"],
-            insertbackground=COLORS["text"], relief="flat"
-        )
-        entry.pack(fill="x", padx=20, ipady=6)
-        entry.focus_set()
-
-        btn_row = tk.Frame(self.window, bg=COLORS["bg"])
-        btn_row.pack(fill="x", padx=20, pady=16)
-
-        confirm = tk.Label(
-            btn_row, text="Create",
-            font=("Segoe UI", 10, "bold"),
-            bg=COLORS["btn"], fg="white",
-            padx=14, pady=6, cursor="hand2"
-        )
-        confirm.pack(side="right")
-        confirm.bind("<Button-1>", lambda e: self._confirm())
-        confirm.bind("<Enter>", lambda e: confirm.config(bg=COLORS["btn_hover"]))
-        confirm.bind("<Leave>", lambda e: confirm.config(bg=COLORS["btn"]))
-
-        self.window.bind("<Return>", lambda e: self._confirm())
-        self.window.bind("<Escape>", lambda e: self.window.destroy())
-
-    def _confirm(self):
-        title = self.title_var.get().strip()
-        if not title:
-            return
-        self.result = {"title": title}
-        self.window.destroy()
-
-
-# ---------------------------------------------------------------------------
-# Dialog: Edit Task Title and Description
-# ---------------------------------------------------------------------------
-
-class EditTaskDialog:
-    def __init__(self, parent, current_title: str, current_desc: str):
-        self.result = None
-
-        self.window = tk.Toplevel(parent)
-        self.window.title("Edit Task")
-        self.window.configure(bg=COLORS["bg"])
-        self.window.geometry("460x300")
-        self.window.resizable(False, False)
-        self.window.grab_set()
-
-        tk.Label(self.window, text="Edit Task",
-                 font=FONT_HEADING, bg=COLORS["bg"],
-                 fg=COLORS["accent"], pady=12).pack()
-        tk.Frame(self.window, bg=COLORS["accent"], height=1).pack(fill="x")
-
-        form = tk.Frame(self.window, bg=COLORS["bg"], padx=24, pady=16)
-        form.pack(fill="both", expand=True)
-
-        tk.Label(form, text="Title *", font=FONT_BODY,
-                 bg=COLORS["bg"], fg=COLORS["text"]).pack(anchor="w")
-        self.title_var = tk.StringVar(value=current_title)
-        title_entry = tk.Entry(form, textvariable=self.title_var,
-                               font=FONT_BODY, bg=COLORS["card"], fg=COLORS["text"],
-                               insertbackground=COLORS["text"], relief="flat")
-        title_entry.pack(fill="x", ipady=5, pady=(2, 12))
-        title_entry.focus_set()
-        title_entry.select_range(0, "end")
-
-        tk.Label(form, text="Description (optional)", font=FONT_BODY,
-                 bg=COLORS["bg"], fg=COLORS["text"]).pack(anchor="w")
-        self.desc_text = tk.Text(form, height=4, font=FONT_BODY,
-                                 bg=COLORS["card"], fg=COLORS["text"],
-                                 insertbackground=COLORS["text"], relief="flat", wrap="word")
-        self.desc_text.insert("1.0", current_desc)
-        self.desc_text.pack(fill="x", pady=(2, 16))
-
-        btn_row = tk.Frame(form, bg=COLORS["bg"])
-        btn_row.pack(fill="x")
-
-        cancel = tk.Label(btn_row, text="Cancel", font=FONT_BODY,
-                          bg=COLORS["btn_secondary"], fg=COLORS["text_dim"],
-                          padx=14, pady=6, cursor="hand2")
-        cancel.pack(side="right", padx=(8, 0))
-        cancel.bind("<Button-1>", lambda e: self.window.destroy())
-
-        confirm = tk.Label(btn_row, text="Save",
-                           font=("Segoe UI", 10, "bold"),
-                           bg=COLORS["btn"], fg="white",
-                           padx=14, pady=6, cursor="hand2")
-        confirm.pack(side="right")
-        confirm.bind("<Button-1>", lambda e: self._confirm())
-        confirm.bind("<Enter>", lambda e: confirm.config(bg=COLORS["btn_hover"]))
-        confirm.bind("<Leave>", lambda e: confirm.config(bg=COLORS["btn"]))
-
-        self.window.bind("<Return>", lambda e: self._confirm())
-        self.window.bind("<Escape>", lambda e: self.window.destroy())
-
-    def _confirm(self):
-        title = self.title_var.get().strip()
-        if not title:
-            return
-        self.result = {
-            "title":       title,
-            "description": self.desc_text.get("1.0", "end").strip()
-        }
-        self.window.destroy()
-
-
-# ---------------------------------------------------------------------------
-# Dialog: Edit Note Title
-# ---------------------------------------------------------------------------
-
-class EditNoteTitleDialog:
-    def __init__(self, parent, current_title: str):
-        self.result = None
-
-        self.window = tk.Toplevel(parent)
-        self.window.title("Edit Note Title")
-        self.window.configure(bg=COLORS["bg"])
-        self.window.geometry("400x150")
-        self.window.resizable(False, False)
-        self.window.grab_set()
-
-        tk.Label(self.window, text="Note Title",
-                 font=FONT_HEADING, bg=COLORS["bg"],
-                 fg=COLORS["accent"], pady=12, padx=20).pack(anchor="w")
-
-        self.title_var = tk.StringVar(value=current_title)
-        entry = tk.Entry(self.window, textvariable=self.title_var,
-                         font=FONT_BODY, bg=COLORS["card"], fg=COLORS["text"],
-                         insertbackground=COLORS["text"], relief="flat")
-        entry.pack(fill="x", padx=20, ipady=6)
-        entry.focus_set()
-        entry.select_range(0, "end")
-
-        btn_row = tk.Frame(self.window, bg=COLORS["bg"])
-        btn_row.pack(fill="x", padx=20, pady=16)
-
-        confirm = tk.Label(btn_row, text="Save",
-                           font=("Segoe UI", 10, "bold"),
-                           bg=COLORS["btn"], fg="white",
-                           padx=14, pady=6, cursor="hand2")
-        confirm.pack(side="right")
-        confirm.bind("<Button-1>", lambda e: self._confirm())
-        confirm.bind("<Enter>", lambda e: confirm.config(bg=COLORS["btn_hover"]))
-        confirm.bind("<Leave>", lambda e: confirm.config(bg=COLORS["btn"]))
-
-        self.window.bind("<Return>", lambda e: self._confirm())
-        self.window.bind("<Escape>", lambda e: self.window.destroy())
+    def __init__(self, parent, title: str, current_title: str = "", ok_text: str = "Save"):
+        super().__init__(parent, title, width=400)
+        self.add_label("Note Title")
+        self.title_var = self.add_entry(current_title, focus=True)
+        self.add_buttons(ok_text, self._confirm)
 
     def _confirm(self):
         title = self.title_var.get().strip()
@@ -1233,9 +847,134 @@ class EditNoteTitleDialog:
         self.window.destroy()
 
 
-# ---------------------------------------------------------------------------
+# Dialog: Edit Task Title and Description
+
+class EditTaskDialog(Dialog):
+    def __init__(self, parent, current_title: str, current_desc: str, current_due: str = ""):
+        super().__init__(parent, "Edit Task", width=460)
+
+        self.add_label("Title *")
+        self.title_var = self.add_entry(current_title, focus=True)
+
+        self.add_label("Description (optional)")
+        self.desc_text = self.add_text(current_desc, height=4)
+
+        self.add_label("Due date (optional)")
+        self.due_var = self.add_entry(current_due)
+        self.add_hint(DUE_DATE_HINT)
+
+        self.add_buttons("Save", self._confirm)
+
+    def _confirm(self):
+        title = self.title_var.get().strip()
+        if not title:
+            return
+        try:
+            due_date = parse_due_date(self.due_var.get())
+        except ValueError:
+            self.show_error("Due date: use YYYY-MM-DD, \"today\" or +N days.")
+            return
+        self.result = {
+            "title":       title,
+            "description": self.desc_text.get("1.0", "end").strip(),
+            "due_date":    due_date,
+        }
+        self.window.destroy()
+
+
+# Dialog: Deleted attachments
+
+class DeletedAttachmentsDialog:
+    """Deleted attachments of a task with buttons to open or restore them.
+    changed = True when something was restored."""
+
+    def __init__(self, parent, task_id: int):
+        self.task_id = task_id
+        self.changed = False
+
+        self.window = tk.Toplevel(parent)
+        self.window.title("Deleted Attachments")
+        self.window.configure(bg=COLORS["bg"])
+        self.window.minsize(460, 200)
+        self.window.transient(parent)
+        remember_geometry(self.window, "deleted_attachments", "520x320", size_only=True)
+
+        tk.Label(self.window, text="Deleted Attachments", font=FONT_HEADING,
+                 bg=COLORS["bg"], fg=COLORS["accent"], pady=12, padx=20).pack(anchor="w")
+        tk.Frame(self.window, bg=COLORS["accent"], height=1).pack(fill="x")
+
+        container, _, self.inner = make_scroll_area(self.window)
+        container.pack(fill="both", expand=True, padx=16, pady=12)
+        self.window.bind("<Escape>", lambda e: self.window.destroy())
+        grab_when_visible(self.window)
+        self._load()
+
+    def _load(self):
+        for w in self.inner.winfo_children():
+            w.destroy()
+        deleted = [a for a in get_attachments(self.task_id, include_deleted=True) if a["deleted"]]
+        if not deleted:
+            tk.Label(self.inner, text="No deleted attachments.", font=FONT_SMALL,
+                     bg=COLORS["bg"], fg=COLORS["text_dim"], pady=20).pack()
+            return
+        for att in deleted:
+            path = resolve_attachment_path(att["stored_path"])
+            exists = os.path.exists(path)
+            row = tk.Frame(self.inner, bg=COLORS["card"], padx=10, pady=6)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=att["filename"], font=FONT_BODY, bg=COLORS["card"],
+                     fg=COLORS["text"] if exists else COLORS["text_dim"]).pack(side="left")
+            if not exists:
+                tk.Label(row, text="  (file missing)", font=FONT_SMALL, bg=COLORS["card"],
+                         fg=COLORS["overdue"]).pack(side="left")
+                continue
+            make_button(row, "Restore", lambda a=att: self._restore(a),
+                        small=True).pack(side="right")
+            make_button(row, "Open", lambda p=path: open_path(p, parent=self.window),
+                        kind="secondary", small=True).pack(side="right", padx=(0, 4))
+
+    def _restore(self, att: dict):
+        """Moves the file back from the 'deleted' subfolder and marks it active."""
+        src = resolve_attachment_path(att["stored_path"])
+        folder = os.path.dirname(src)
+        if os.path.basename(folder) == "deleted":
+            folder = os.path.dirname(folder)
+        dest = unique_path(os.path.join(folder, att["filename"]))
+        try:
+            os.replace(src, dest)
+            restore_attachment(att["id"], dest)
+        except Exception as ex:
+            messagebox.showerror("Error", f"Failed to restore the attachment:\n{ex}",
+                                 parent=self.window)
+            return
+        self.changed = True
+        self._load()
+
+
+# Dialog: Edit Link
+
+class LinkEditDialog(Dialog):
+    def __init__(self, parent, link: dict):
+        super().__init__(parent, "Edit Link", width=460)
+
+        self.add_label("Label")
+        self.label_var = self.add_entry(link["label"], focus=True)
+
+        self.add_label("Path")
+        self.path_var = self.add_entry(link["path"])
+
+        self.add_buttons("Save", self._save)
+
+    def _save(self):
+        label = self.label_var.get().strip()
+        path  = self.path_var.get().strip()
+        if not label or not path:
+            return
+        self.result = {"label": label, "path": path}
+        self.window.destroy()
+
+
 # Note Editor Window
-# ---------------------------------------------------------------------------
 
 class NoteEditorWindow:
     def __init__(self, parent, note: dict, on_save=None, on_close=None):
@@ -1247,11 +986,10 @@ class NoteEditorWindow:
         self.window = tk.Toplevel(parent)
         self.window.title(note["title"])
         self.window.configure(bg=COLORS["bg"])
-        self.window.geometry("700x520")
         self.window.minsize(500, 350)
+        remember_geometry(self.window, "note", "700x520", size_only=True)
 
-        if on_close:
-            self.window.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.window.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
         self._render_preview()
@@ -1277,7 +1015,7 @@ class NoteEditorWindow:
         return self.editor_text.get("1.0", "end-1c") != (self.note.get("content") or "")
 
     def save_if_changed(self):
-        """Saves the note if it has unsaved changes — used when the window is closed
+        """Saves the note if it has unsaved changes, when the window is closed
         from outside (task window or application closed)."""
         if self.has_unsaved_changes():
             self._save()
@@ -1328,15 +1066,8 @@ class NoteEditorWindow:
             fg=COLORS["text_dim"], padx=8
         ).pack(side="left")
 
-        self.mode_btn = tk.Label(
-            hdr, text="✏ Edit",
-            font=FONT_SMALL, bg=COLORS["btn"], fg="white",
-            padx=10, pady=4, cursor="hand2"
-        )
+        self.mode_btn = make_button(hdr, "✏ Edit", self._toggle_mode, small=True)
         self.mode_btn.pack(side="right", padx=12, pady=8)
-        self.mode_btn.bind("<Button-1>", lambda e: self._toggle_mode())
-        self.mode_btn.bind("<Enter>", lambda e: self.mode_btn.config(bg=COLORS["btn_hover"]))
-        self.mode_btn.bind("<Leave>", lambda e: self.mode_btn.config(bg=COLORS["btn"]))
 
         tk.Frame(self.window, bg=COLORS["accent"], height=2).pack(fill="x")
 
@@ -1355,46 +1086,35 @@ class NoteEditorWindow:
             state="disabled", cursor="arrow"
         )
         self.preview_text.grid(row=0, column=0, sticky="nsew")
-        self._configure_preview_tags()
 
         self.editor_text = tk.Text(
             self.content_frame,
-            font=("Consolas", 10), bg=COLORS["panel"], fg=COLORS["text"],
+            font=mono_font(10), bg=COLORS["panel"], fg=COLORS["text"],
             insertbackground=COLORS["text"],
             relief="flat", wrap="word", padx=12, pady=8
         )
-        sb = tk.Scrollbar(self.content_frame, orient="vertical")
+        # One scrollbar for both views; it scrolls the visible one
+        sb = tk.Scrollbar(self.content_frame, orient="vertical",
+                          command=lambda *args: self._visible_text().yview(*args))
         sb.grid(row=0, column=1, sticky="ns")
         self.preview_text.configure(yscrollcommand=sb.set)
         self.editor_text.configure(yscrollcommand=sb.set)
 
-    def _configure_preview_tags(self):
-        self.preview_text.tag_configure("bold",          font=("Segoe UI", 10, "bold"))
-        self.preview_text.tag_configure("italic",        font=("Segoe UI", 10, "italic"))
-        self.preview_text.tag_configure("bold_italic",   font=("Segoe UI", 10, "bold italic"))
-        self.preview_text.tag_configure("strikethrough", overstrike=True)
-        for color, _ in HIGHLIGHT_COLORS:
-            self.preview_text.tag_configure(f"hl_{color}", background=color, foreground="#1a1a2e")
+    def _visible_text(self) -> tk.Text:
+        return self.editor_text if self._edit_mode else self.preview_text
 
     def _build_toolbar(self):
         tools = [
-            ("B",  "bold",          self._fmt_bold),
-            ("I",  "italic",        self._fmt_italic),
-            ("S",  "strikethrough", self._fmt_strike),
-            ("🎨", "highlight",     self._fmt_highlight),
+            ("B",  font(10, "bold"),   self._fmt_bold),
+            ("I",  font(10, "italic"), self._fmt_italic),
+            ("S",  font(10),           self._fmt_strike),
+            ("H",  font(10, "bold underline"), self._fmt_highlight),
         ]
-        fonts = {
-            "bold":          ("Segoe UI", 10, "bold"),
-            "italic":        ("Segoe UI", 10, "italic"),
-            "strikethrough": ("Segoe UI", 10),
-        }
-        for symbol, ftype, cmd in tools:
+        for symbol, tool_font, cmd in tools:
             btn = tk.Label(
-                self.toolbar, text=symbol,
-                font=fonts.get(ftype, FONT_BODY),
+                self.toolbar, text=symbol, font=tool_font,
                 bg=COLORS["panel"], fg=COLORS["text"],
-                padx=10, pady=4, cursor="hand2",
-                relief="flat"
+                padx=10, pady=4, cursor="hand2", relief="flat"
             )
             btn.pack(side="left", padx=2, pady=4)
             btn.bind("<Button-1>", lambda e, c=cmd: c())
@@ -1418,7 +1138,7 @@ class NoteEditorWindow:
 
     def _enter_edit_mode(self):
         self._edit_mode = True
-        self.mode_btn.config(text="💾 Save")
+        self.mode_btn.config(text="Save")
 
         self.editor_text.delete("1.0", "end")
         self.editor_text.insert("1.0", self.note.get("content") or "")
@@ -1443,36 +1163,37 @@ class NoteEditorWindow:
         if self.on_save:
             self.on_save()
 
+    # Markdown preview
+    # Every piece of text gets one tag describing all its formats together
+    # (e.g. "bold_hl_hexFFD700"), configured on first use in _configure_combo_tag.
+
+    _PATTERNS = [
+        (re.compile(r'==(#[0-9A-Fa-f]{6})==(.*?)=='), "highlight"),
+        (re.compile(r'\*\*\*(.*?)\*\*\*'),            "bold_italic"),
+        (re.compile(r'\*\*(.*?)\*\*'),                "bold"),
+        (re.compile(r'\*([^*]+?)\*'),                 "italic"),
+        (re.compile(r'~~(.*?)~~'),                    "strikethrough"),
+    ]
+
     def _render_preview(self):
         content = self.note.get("content") or ""
         self.preview_text.configure(state="normal")
         self.preview_text.delete("1.0", "end")
 
         for line in content.split("\n"):
-            self._insert_markdown_line(line)
+            self._parse_segment(line, frozenset())
             self.preview_text.insert("end", "\n")
 
         self.preview_text.configure(state="disabled")
-
-    def _insert_markdown_line(self, line: str):
-        self._parse_segment(line, frozenset())
 
     def _parse_segment(self, text: str, active_tags: frozenset):
         if not text:
             return
 
-        patterns = [
-            (re.compile(r'==(#[0-9A-Fa-f]{6})==(.*?)==', re.DOTALL), "highlight"),
-            (re.compile(r'\*\*\*(.*?)\*\*\*', re.DOTALL),  "bold_italic"),
-            (re.compile(r'\*\*(.*?)\*\*', re.DOTALL),      "bold"),
-            (re.compile(r'\*([^\*]+?)\*', re.DOTALL),       "italic"),
-            (re.compile(r'~~(.*?)~~', re.DOTALL),           "strikethrough"),
-        ]
-
         earliest_match = None
         earliest_pattern_type = None
 
-        for pat, ptype in patterns:
+        for pat, ptype in self._PATTERNS:
             m = pat.search(text)
             if m and (earliest_match is None or m.start() < earliest_match.start()):
                 earliest_match = m
@@ -1486,14 +1207,9 @@ class NoteEditorWindow:
             self._insert_text(text[:earliest_match.start()], active_tags)
 
         if earliest_pattern_type == "highlight":
-            color  = earliest_match.group(1)
-            inner  = earliest_match.group(2)
-            hl_tag = f"hl_{color.replace('#', 'hex')}"
-            if hl_tag not in self.preview_text.tag_names():
-                self.preview_text.tag_configure(
-                    hl_tag, background=color, foreground="#1a1a2e"
-                )
-            new_tags = active_tags | {hl_tag}
+            color    = earliest_match.group(1)
+            inner    = earliest_match.group(2)
+            new_tags = active_tags | {f"hl_{color.replace('#', 'hex')}"}
         else:
             inner    = earliest_match.group(1)
             new_tags = active_tags | {earliest_pattern_type}
@@ -1507,11 +1223,11 @@ class NoteEditorWindow:
     def _insert_text(self, text: str, tags: frozenset):
         if not text:
             return
-        tag_list = list(tags)
-        if not tag_list:
+        if not tags:
             self.preview_text.insert("end", text)
             return
-        combo_key = "_".join(sorted(tag_list))
+        tag_list = sorted(tags)
+        combo_key = "_".join(tag_list)
         if combo_key not in self.preview_text.tag_names():
             self._configure_combo_tag(combo_key, tag_list)
         self.preview_text.insert("end", text, combo_key)
@@ -1521,27 +1237,18 @@ class NoteEditorWindow:
         font_italic = "italic"        in tag_list or "bold_italic" in tag_list
         overstrike  = "strikethrough" in tag_list
 
-        if font_bold and font_italic:
-            font = ("Segoe UI", 10, "bold italic")
-        elif font_bold:
-            font = ("Segoe UI", 10, "bold")
-        elif font_italic:
-            font = ("Segoe UI", 10, "italic")
-        else:
-            font = ("Segoe UI", 10)
+        style = " ".join(s for s, on in (("bold", font_bold), ("italic", font_italic)) if on)
+        kwargs = {"font": font(10, style) if style else font(10),
+                  "overstrike": overstrike}
 
-        hl_tag = next((t for t in tag_list if t.startswith("hl_")), None)
-        bg_color = None
+        hl_tag = next((t for t in tag_list if t.startswith("hl_hex")), None)
         if hl_tag:
-            hex_color = hl_tag.replace("hl_hex", "#").replace("hl_", "#")
-            bg_color = hex_color
-
-        kwargs = {"font": font, "overstrike": overstrike}
-        if bg_color:
-            kwargs["background"] = bg_color
+            kwargs["background"] = "#" + hl_tag[len("hl_hex"):]
             kwargs["foreground"] = "#1a1a2e"
 
         self.preview_text.tag_configure(combo_key, **kwargs)
+
+    # Formatting toolbar
 
     def _wrap_selection(self, marker_open: str, marker_close: str = None):
         if marker_close is None:
@@ -1566,9 +1273,7 @@ class NoteEditorWindow:
             self._wrap_selection(f"=={picker.result}==", "==")
 
 
-# ---------------------------------------------------------------------------
 # Background Color Picker
-# ---------------------------------------------------------------------------
 
 class HighlightColorPicker:
     def __init__(self, parent, colors: list):
@@ -1579,7 +1284,8 @@ class HighlightColorPicker:
         self.window.configure(bg=COLORS["bg"])
         self.window.geometry("320x100")
         self.window.resizable(False, False)
-        self.window.grab_set()
+        self.window.transient(parent)
+        grab_when_visible(self.window)
 
         tk.Label(
             self.window, text="Select Color:",
@@ -1597,7 +1303,7 @@ class HighlightColorPicker:
                 padx=2, pady=10
             )
             swatch.pack(side="left", padx=3)
-            _make_tooltip(swatch, name)
+            make_tooltip(swatch, name)
             swatch.bind("<Button-1>", lambda e, c=hex_color: self._pick(c))
 
         self.window.bind("<Escape>", lambda e: self.window.destroy())
@@ -1607,91 +1313,18 @@ class HighlightColorPicker:
         self.window.destroy()
 
 
-# ---------------------------------------------------------------------------
-# Dialog: Edit Link
-# ---------------------------------------------------------------------------
-
-class LinkEditDialog:
-    def __init__(self, parent, link: dict):
-        self.result = None
-
-        self.window = tk.Toplevel(parent)
-        self.window.title("Edit Link")
-        self.window.configure(bg=COLORS["bg"])
-        self.window.geometry("460x200")
-        self.window.resizable(False, False)
-        self.window.grab_set()
-
-        tk.Label(self.window, text="Edit Link", font=FONT_HEADING,
-                 bg=COLORS["bg"], fg=COLORS["accent"],
-                 pady=12, padx=20).pack(anchor="w")
-        tk.Frame(self.window, bg=COLORS["accent"], height=1).pack(fill="x")
-
-        form = tk.Frame(self.window, bg=COLORS["bg"], padx=20, pady=14)
-        form.pack(fill="both", expand=True)
-
-        tk.Label(form, text="Label", font=FONT_BODY,
-                 bg=COLORS["bg"], fg=COLORS["text"]).pack(anchor="w")
-        self.label_var = tk.StringVar(value=link["label"])
-        entry_label = tk.Entry(form, textvariable=self.label_var, font=FONT_BODY,
-                               bg=COLORS["card"], fg=COLORS["text"],
-                               insertbackground=COLORS["text"], relief="flat")
-        entry_label.pack(fill="x", ipady=5, pady=(2, 10))
-        entry_label.focus_set()
-        entry_label.select_range(0, "end")
-
-        tk.Label(form, text="Path", font=FONT_BODY,
-                 bg=COLORS["bg"], fg=COLORS["text"]).pack(anchor="w")
-        self.path_var = tk.StringVar(value=link["path"])
-        entry_path = tk.Entry(form, textvariable=self.path_var, font=FONT_BODY,
-                              bg=COLORS["card"], fg=COLORS["text"],
-                              insertbackground=COLORS["text"], relief="flat")
-        entry_path.pack(fill="x", ipady=5, pady=(2, 14))
-
-        btn_row = tk.Frame(form, bg=COLORS["bg"])
-        btn_row.pack(fill="x")
-
-        cancel = tk.Label(btn_row, text="Cancel", font=FONT_BODY,
-                          bg=COLORS["btn_secondary"], fg=COLORS["text_dim"],
-                          padx=10, pady=6, cursor="hand2")
-        cancel.pack(side="right", padx=(8, 0))
-        cancel.bind("<Button-1>", lambda e: self.window.destroy())
-
-        save = tk.Label(btn_row, text="Save", font=("Segoe UI", 10, "bold"),
-                        bg=COLORS["btn"], fg="white",
-                        padx=10, pady=6, cursor="hand2")
-        save.pack(side="right")
-        save.bind("<Button-1>", lambda e: self._save())
-        save.bind("<Enter>", lambda e: save.config(bg=COLORS["btn_hover"]))
-        save.bind("<Leave>", lambda e: save.config(bg=COLORS["btn"]))
-
-        self.window.bind("<Return>", lambda e: self._save())
-        self.window.bind("<Escape>", lambda e: self.window.destroy())
-
-    def _save(self):
-        label = self.label_var.get().strip()
-        path  = self.path_var.get().strip()
-        if not label or not path:
-            return
-        self.result = {"label": label, "path": path}
-        self.window.destroy()
-
-
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 def _note_preview(content: str, max_lines: int = 2, max_chars: int = 78) -> str:
     """Returns a preview of the note content: max_lines lines of max_chars characters.
-    Removes markdown tags before displaying."""
+    Removes markdown tags (same syntax as the note preview) before displaying."""
     if not content:
         return ""
-    # Delete markdown tags
-    text = re.sub(r'\*\*\*(.*?)\*\*\*', r'\1', content)
+    text = re.sub(r'==(#[0-9A-Fa-f]{6})==(.*?)==', r'\2', content)
+    text = re.sub(r'\*\*\*(.*?)\*\*\*', r'\1', text)
     text = re.sub(r'\*\*(.*?)\*\*',     r'\1', text)
-    text = re.sub(r'\*(.*?)\*',         r'\1', text)
+    text = re.sub(r'\*([^*]+?)\*',      r'\1', text)
     text = re.sub(r'~~(.*?)~~',         r'\1', text)
-    text = re.sub(r'==(#[0-9A-Fa-f]{6})==(.*?)==', r'\2', text)
 
     lines = [l for l in text.split('\n') if l.strip()]
     preview = []
@@ -1700,55 +1333,3 @@ def _note_preview(content: str, max_lines: int = 2, max_chars: int = 78) -> str:
             line = line[:max_chars - 1] + "…"
         preview.append(line)
     return '\n'.join(preview)
-
-def _editor_alive(editor) -> bool:
-    try:
-        return bool(editor.window.winfo_exists())
-    except Exception:
-        return False
-
-
-def _set_bg(widget, color: str):
-    """Recursively sets the background color of a widget and its children."""
-    try:
-        widget.configure(bg=color)
-    except tk.TclError:
-        pass
-    for child in widget.winfo_children():
-        try:
-            child.configure(bg=color)
-        except tk.TclError:
-            pass
-
-
-def _make_tooltip(widget, text: str):
-    tip_window = None
-
-    def show(e):
-        nonlocal tip_window
-        x = widget.winfo_rootx() + 10
-        y = widget.winfo_rooty() + widget.winfo_height() + 4
-        tip_window = tk.Toplevel(widget)
-        tip_window.wm_overrideredirect(True)
-        tip_window.wm_geometry(f"+{x}+{y}")
-        tk.Label(
-            tip_window, text=text,
-            font=FONT_SMALL, bg="#ffffe0", fg="#1a1a2e",
-            relief="solid", borderwidth=1, padx=6, pady=3
-        ).pack()
-
-    def hide(e):
-        nonlocal tip_window
-        if tip_window:
-            tip_window.destroy()
-            tip_window = None
-
-    widget.bind("<Enter>", show)
-    widget.bind("<Leave>", hide)
-
-
-def _open_path(path: str, link_type: str):
-    try:
-        os.startfile(path)
-    except Exception as ex:
-        messagebox.showerror("Error", f"Can't be opened:\n{path}\n\n{ex}")

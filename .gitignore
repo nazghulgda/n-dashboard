@@ -12,3 +12,15 @@ backups/
 settings.json
 attachments/
 tasks.db.corrupt_*
+tasks.db.bak.*
+tasks.db.lock
+*.tmp
+PYTHON_MULTIPLATFORM_GUIDE.md
+.venv/
+build/
+dist/
+*.spec
+.DS_Store
+Thumbs.db
+.vscode/
+WinDashboard.lock

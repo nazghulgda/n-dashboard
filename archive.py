@@ -1,4 +1,4 @@
-# archive.py - archiving and restoring tasks
+# Archiving tasks to ZIP files and restoring them
 
 import os
 import json
@@ -10,14 +10,10 @@ from datetime import datetime
 from database import (
     get_task, get_checkpoints, get_notes, get_links,
     get_attachments, get_attachment_dir, resolve_attachment_path, to_stored_path,
-    get_connection, delete_task, init_db
+    get_connection, delete_task, init_db, checkpoint_progress, unique_path, legacy_status_of
 )
-from config import ARCHIVE_DIR, ATTACHMENTS_DIR, APP_VERSION, CHECKPOINTS
+from config import ARCHIVE_DIR, ATTACHMENTS_DIR, APP_VERSION
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _safe_filename(text: str, max_len: int = 40) -> str:
     """Converts task title into a safe file name."""
@@ -31,9 +27,7 @@ def _ensure_archive_dir():
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
 
-# ---------------------------------------------------------------------------
 # Export
-# ---------------------------------------------------------------------------
 
 def export_task_to_zip(task_id: int, source: str) -> str:
     """
@@ -59,7 +53,6 @@ def export_task_to_zip(task_id: int, source: str) -> str:
         folder = "attachments/deleted" if a["deleted"] else "attachments"
         a["arc_name"] = f"{folder}/{os.path.basename(a['stored_path'])}"
 
-    # JSON data
     data = {
         "meta": {
             "export_date":    datetime.now().isoformat(),
@@ -74,17 +67,17 @@ def export_task_to_zip(task_id: int, source: str) -> str:
     }
 
     # README readable without the application
-    done_checkpoints  = [c for c in checkpoints if c["completed"]]
-    total_checkpoints = len(checkpoints)
+    done_count, total_count = checkpoint_progress(checkpoints)
     readme_lines = [
         f"TASK: {task['title']}",
         f"{'=' * 60}",
         f"ID:            {task['id']}",
         f"Description:   {task['description'] or '(none)'}",
         f"Created:       {task['created_at'][:16].replace('T', ' ')}",
+        f"Due date:      {task.get('due_date') or '(none)'}",
         f"Archived:      {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         f"Source:        {'On Hold' if source == 'onhold' else 'Active (finished)'}",
-        f"Progress:      {len(done_checkpoints)}/{total_checkpoints} checkpoints",
+        f"Progress:      {done_count}/{total_count} checkpoints",
         "",
         "CHECKPOINTS:",
         "-" * 40,
@@ -94,7 +87,8 @@ def export_task_to_zip(task_id: int, source: str) -> str:
             status = f"x{c['iteration_count']}" if c["iteration_count"] > 0 else "[ ]"
         else:
             status = "[x]" if c["completed"] else "[ ]"
-        readme_lines.append(f"  {status}  {c['checkpoint_order']:2}. {c['name']}")
+        when = f"  ({c['completed_at'][:10]})" if c.get("completed_at") else ""
+        readme_lines.append(f"  {status}  {c['checkpoint_order']:2}. {c['name']}{when}")
 
     if notes:
         readme_lines += ["", "NOTES:", "-" * 40]
@@ -120,29 +114,42 @@ def export_task_to_zip(task_id: int, source: str) -> str:
 
     readme_text = "\n".join(readme_lines)
 
-    # ZIP file name
     date_str   = datetime.now().strftime("%Y-%m-%d")
     src_tag    = "onhold" if source == "onhold" else "finished"
     safe_title = _safe_filename(task["title"])
-    zip_name   = f"task_{task['id']}_{src_tag}_{safe_title}_{date_str}.zip"
-    zip_path   = os.path.join(ARCHIVE_DIR, zip_name)
+    zip_name   = f"task_{task['id']}_{src_tag}_{safe_title}_{date_str}"
+    zip_path   = os.path.join(ARCHIVE_DIR, f"{zip_name}.zip")
 
-    # Write ZIP
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("task.json",   json.dumps(data, ensure_ascii=False, indent=2))
-        zf.writestr("README.txt",  readme_text)
+    # Never overwrite an existing archive (task ids can repeat after the database
+    # was restored from its last working copy), so add a number suffix
+    zip_path = unique_path(zip_path)
 
-        # Pack attachments
-        for a in attachments:
-            src_path = resolve_attachment_path(a["stored_path"])
-            if not os.path.exists(src_path):
-                continue  # file does not exist anymore — skip, do not break
-            zf.write(src_path, a["arc_name"])
+    # Write ZIP under a temporary name and rename it only when complete, so an
+    # interrupted write never leaves a broken archive; the task stays in the database
+    tmp_path = zip_path + ".tmp"
+    try:
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("task.json",   json.dumps(data, ensure_ascii=False, indent=2))
+            zf.writestr("README.txt",  readme_text)
+
+            for a in attachments:
+                src_path = resolve_attachment_path(a["stored_path"])
+                if not os.path.exists(src_path):
+                    continue  # file does not exist anymore: skip it
+                zf.write(src_path, a["arc_name"])
+        os.replace(tmp_path, zip_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
 
     # Delete task from database (checkpoints, notes, links and attachments records as well)
     delete_task(task_id)
 
-    # Delete attachments folders of the task from disk — the ZIP has a copy
+    # The ZIP has a copy, so the attachment folders of the task are removed from disk
     att_dirs = {get_attachment_dir(task_id, task["title"])}
     for a in attachments:
         att_dir = os.path.dirname(resolve_attachment_path(a["stored_path"]))
@@ -162,9 +169,7 @@ def export_task_to_zip(task_id: int, source: str) -> str:
     return zip_path
 
 
-# ---------------------------------------------------------------------------
 # Import / restore
-# ---------------------------------------------------------------------------
 
 def import_task_from_zip(zip_path: str) -> int:
     """
@@ -186,7 +191,7 @@ def import_task_from_zip(zip_path: str) -> int:
                 arc_name = f"{folder}/{att['filename']}"
             return zf.open(arc_name) if arc_name in names else None
 
-        source = data["meta"].get("source", "active")
+        source = data.get("meta", {}).get("source", "active")
         return insert_task_data(data, source == "onhold", open_attachment)
 
 
@@ -205,16 +210,15 @@ def insert_task_data(data: dict, on_hold: bool, open_attachment=None) -> int:
     links  = data.get("links", [])
     attachments = data.get("attachments", [])
 
-    template_by_name = {c["name"]: c["order"] for c in CHECKPOINTS}
-
     with get_connection() as conn:
         cur = conn.execute(
             """INSERT INTO tasks
-               (title, description, on_hold, on_hold_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (title, description, due_date, on_hold, on_hold_at, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 task["title"],
                 task.get("description", ""),
+                task.get("due_date"),
                 1 if on_hold else 0,
                 task.get("on_hold_at") if on_hold else None,
                 task["created_at"],
@@ -225,16 +229,16 @@ def insert_task_data(data: dict, on_hold: bool, open_attachment=None) -> int:
 
         # Insert checkpoints (old archives use stage_order / stage_type keys)
         for c in checkpoints:
-            if "template_order" in c:
-                template_order = c["template_order"]
+            if "status_group" in c:
+                status_group, group_order = c["status_group"], c.get("group_order")
             else:
-                # Archives created before template_order — match with the template by name
-                template_order = template_by_name.get(c["name"])
+                # Saved before 0.7: status from the template of those versions
+                status_group, group_order = legacy_status_of(c)
             conn.execute(
                 """INSERT INTO task_checkpoints
                    (task_id, checkpoint_order, name, checkpoint_type, completed, iteration_count,
-                    template_order)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    template_order, status_group, group_order, completed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     new_task_id,
                     c["checkpoint_order"] if "checkpoint_order" in c else c["stage_order"],
@@ -242,11 +246,13 @@ def insert_task_data(data: dict, on_hold: bool, open_attachment=None) -> int:
                     c.get("checkpoint_type", c.get("stage_type", "check")),
                     c["completed"],
                     c.get("iteration_count", 0),
-                    template_order,
+                    c.get("template_order"),
+                    status_group,
+                    group_order,
+                    c.get("completed_at"),
                 )
             )
 
-        # Insert notes
         for n in notes:
             conn.execute(
                 """INSERT INTO task_notes
@@ -261,7 +267,6 @@ def insert_task_data(data: dict, on_hold: bool, open_attachment=None) -> int:
                 )
             )
 
-        # Insert links
         for l in links:
             conn.execute(
                 """INSERT INTO task_links
@@ -270,7 +275,7 @@ def insert_task_data(data: dict, on_hold: bool, open_attachment=None) -> int:
                 (new_task_id, l["label"], l["path"], l["link_type"])
             )
 
-        # Attachments — copy files into the new folder of the task
+        # Attachment files go into a new folder of the task
         if attachments and open_attachment:
             new_att_dir = get_attachment_dir(new_task_id, task["title"])
             for a in attachments:
@@ -282,13 +287,7 @@ def insert_task_data(data: dict, on_hold: bool, open_attachment=None) -> int:
                 os.makedirs(dest_dir, exist_ok=True)
                 file_name  = os.path.basename(
                     a.get("arc_name") or a.get("stored_path") or a["filename"])
-                dest_path  = os.path.join(dest_dir, file_name)
-
-                # If the name is already taken — add a time suffix
-                if os.path.exists(dest_path):
-                    base, ext = os.path.splitext(file_name)
-                    dest_path = os.path.join(
-                        dest_dir, f"{base}_{datetime.now().strftime('%H%M%S%f')}{ext}")
+                dest_path  = unique_path(os.path.join(dest_dir, file_name))
 
                 with src, open(dest_path, "wb") as dst:
                     shutil.copyfileobj(src, dst)
@@ -309,32 +308,21 @@ def insert_task_data(data: dict, on_hold: bool, open_attachment=None) -> int:
     return new_task_id
 
 
-# ---------------------------------------------------------------------------
 # Removing an archived task
-# ---------------------------------------------------------------------------
 
 def remove_archived_task(zip_path: str):
     """
     Moves the ZIP file to the 'removed' subfolder inside ARCHIVE_DIR.
-    The file is not deleted permanently — it can be recovered manually.
+    The file is not deleted permanently and can be recovered by hand.
     """
     removed_dir = os.path.join(ARCHIVE_DIR, "removed")
     os.makedirs(removed_dir, exist_ok=True)
 
-    filename = os.path.basename(zip_path)
-    dest = os.path.join(removed_dir, filename)
-
-    # If a file with the same name already exists in removed — add a time suffix
-    if os.path.exists(dest):
-        base, ext = os.path.splitext(filename)
-        dest = os.path.join(removed_dir, f"{base}_{datetime.now().strftime('%H%M%S')}{ext}")
-
-    os.rename(zip_path, dest)
+    dest = unique_path(os.path.join(removed_dir, os.path.basename(zip_path)))
+    os.replace(zip_path, dest)
 
 
-# ---------------------------------------------------------------------------
 # Listing the archive
-# ---------------------------------------------------------------------------
 
 def list_archive() -> list[dict]:
     """
@@ -354,8 +342,7 @@ def list_archive() -> list[dict]:
             meta   = data.get("meta", {})
             task   = data.get("task", {})
             checkpoints = data.get("checkpoints", data.get("stages", []))
-            done   = sum(1 for c in checkpoints if c.get("completed"))
-            total  = len(checkpoints)
+            done, total = checkpoint_progress(checkpoints)
             result.append({
                 "zip_path":      zip_path,
                 "filename":      fname,
@@ -368,6 +355,6 @@ def list_archive() -> list[dict]:
                 "progress":      f"{done}/{total}",
             })
         except Exception:
-            continue  # corrupted ZIP — skipped
+            continue  # corrupted ZIP
 
     return result
